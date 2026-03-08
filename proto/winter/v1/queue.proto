@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package winter.v1;
+
+option go_package = "github.com/kylegrahammatzen/winter/proto/winter/v1;winterv1";
+
+service QueueService {
+  rpc Enqueue(EnqueueRequest) returns (EnqueueResponse);
+  rpc Dequeue(DequeueRequest) returns (DequeueResponse);
+  rpc Ack(AckRequest) returns (AckResponse);
+  rpc Nack(NackRequest) returns (NackResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+  rpc QueueStats(QueueStatsRequest) returns (QueueStatsResponse);
+}
+
+message EnqueueRequest {
+  string kind = 1;
+  bytes payload = 2;
+  string queue = 3;
+  int32 priority = 4;
+  int64 scheduled_at = 5;
+  int32 max_retries = 6;
+  int64 unique_period_ms = 7;
+}
+
+message EnqueueResponse {
+  string job_id = 1;
+}
+
+message DequeueRequest {
+  string queue = 1;
+  string worker_id = 2;
+  int64 timeout_ms = 3;
+}
+
+message DequeueResponse {
+  Job job = 1;
+}
+
+message AckRequest {
+  string job_id = 1;
+  string queue = 2;
+  string worker_id = 3;
+}
+
+message AckResponse {}
+
+message NackRequest {
+  string job_id = 1;
+  string queue = 2;
+  string worker_id = 3;
+  string error = 4;
+  bool skip_retry = 5;
+}
+
+message NackResponse {
+  string outcome = 1;
+}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  repeated string queues = 2;
+}
+
+message HeartbeatResponse {}
+
+message GetJobRequest {
+  string job_id = 1;
+}
+
+message GetJobResponse {
+  Job job = 1;
+}
+
+message QueueStatsRequest {
+  string queue = 1;
+}
+
+message QueueStatsResponse {
+  string queue = 1;
+  int64 ready = 2;
+  int64 active = 3;
+  int64 delayed = 4;
+  int64 dead = 5;
+  int64 completed = 6;
+  int64 failed = 7;
+}
+
+message Job {
+  string id = 1;
+  string kind = 2;
+  bytes payload = 3;
+  string queue = 4;
+  int32 priority = 5;
+  string state = 6;
+  int32 attempt = 7;
+  int32 max_retries = 8;
+  int64 created_at = 9;
+  int64 scheduled_at = 10;
+  int64 started_at = 11;
+  int64 completed_at = 12;
+  string last_error = 13;
+}
