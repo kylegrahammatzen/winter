@@ -1,0 +1,13 @@
+bin/
+*.exe
+*.test
+*.out
+coverage.html
+bench.txt
+vendor/
+.env
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
