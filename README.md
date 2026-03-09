@@ -13,6 +13,9 @@ Winter is an open-source distributed task queue for Go, backed by Redis. With Wi
 - Dead letter queue with inspection and retry
 - Unique job deduplication
 - Lease-based worker recovery
+- Rate limiting with Redis-backed token bucket
+- Result storage with typed retrieval
+- Lifecycle hooks (OnStart, OnComplete, OnError, OnDead)
 - CLI for queue management
 
 ## Install
@@ -141,6 +144,62 @@ func (h *Handler) Work(ctx context.Context, job *winter.Job[SyncInventory]) erro
 
     return nil
 }
+```
+
+### Rate Limiting
+
+Limit how fast tasks of a given kind are processed using a Redis-backed token bucket.
+
+```go
+// On the task itself
+func (SendEmail) Options() winter.TaskOptions {
+    return winter.TaskOptions{
+        RateLimit: &winter.RateLimit{Max: 10, Per: time.Second},
+    }
+}
+
+// Or set it on the server directly
+server.SetRateLimit("email.send", 10, time.Second)
+```
+
+When the rate limit is exceeded, the job is re-enqueued after the bucket refills.
+
+### Result Storage
+
+Store results from completed jobs and retrieve them later.
+
+```go
+// Inside a handler, set a result on the job
+winter.HandleFunc(server, func(ctx context.Context, job *winter.Job[ProcessImage]) error {
+    url := resize(job.Args.Path)
+    job.SetResult(map[string]string{"url": url})
+    return nil
+})
+
+// Later, poll for the result
+var result map[string]string
+err := winter.WaitForResult(client, ctx, jobID, &result)
+```
+
+Results are stored in Redis with a 7-day TTL.
+
+### Lifecycle Hooks
+
+Register callbacks that fire at specific points in a job's lifecycle.
+
+```go
+server.OnStart(func(ctx context.Context, ev winter.JobEvent) {
+    log.Printf("starting %s (attempt %d)", ev.Kind, ev.Attempt)
+})
+server.OnComplete(func(ctx context.Context, ev winter.JobEvent) {
+    metrics.Increment("jobs.completed")
+})
+server.OnError(func(ctx context.Context, ev winter.JobEvent) {
+    alerting.Notify(ev.Err)
+})
+server.OnDead(func(ctx context.Context, ev winter.JobEvent) {
+    log.Printf("job %s is dead: %v", ev.ID, ev.Err)
+})
 ```
 
 ### Task options
