@@ -174,7 +174,7 @@ func (q *Queue) Dequeue(ctx context.Context, queueName string, workerID string) 
 		return nil, fmt.Errorf("winter: dequeue: %w", err)
 	}
 
-	vals, ok := result.([]interface{})
+	vals, ok := result.([]any)
 	if !ok || len(vals) == 0 {
 		return nil, nil
 	}
@@ -232,7 +232,11 @@ func (q *Queue) Nack(ctx context.Context, queueName string, jobID string, worker
 	if err != nil {
 		return "", fmt.Errorf("winter: nack: %w", err)
 	}
-	return result.(string), nil
+	s, ok := result.(string)
+	if !ok {
+		return "", fmt.Errorf("winter: nack: unexpected result type %T", result)
+	}
+	return s, nil
 }
 
 // RescheduleJob moves an active job back into the delayed set with a new scheduled time.
@@ -287,7 +291,11 @@ func (q *Queue) Promote(ctx context.Context, queueName string, limit int) (int64
 	if err != nil {
 		return 0, fmt.Errorf("winter: promote: %w", err)
 	}
-	return result.(int64), nil
+	n, ok := result.(int64)
+	if !ok {
+		return 0, fmt.Errorf("winter: promote: unexpected result type %T", result)
+	}
+	return n, nil
 }
 
 // ExtendLease pushes the lease expiry forward for a job that is still being processed.
@@ -320,7 +328,7 @@ func (q *Queue) RecoverExpiredLeasesAt(ctx context.Context, queueName string, li
 		return nil, fmt.Errorf("winter: recover leases: %w", err)
 	}
 
-	vals, ok := result.([]interface{})
+	vals, ok := result.([]any)
 	if !ok {
 		return nil, nil
 	}
@@ -445,7 +453,11 @@ func (q *Queue) RetryDead(ctx context.Context, queueName string, jobID string) e
 	if err != nil {
 		return fmt.Errorf("winter: retry dead: %w", err)
 	}
-	if result.(int64) == 0 {
+	n, ok := result.(int64)
+	if !ok {
+		return fmt.Errorf("winter: retry dead: unexpected result type %T", result)
+	}
+	if n == 0 {
 		return fmt.Errorf("winter: job %s not found in dead queue", jobID)
 	}
 	return nil
@@ -457,7 +469,11 @@ func (q *Queue) PurgeDead(ctx context.Context, queueName string) (int64, error) 
 	if err != nil {
 		return 0, fmt.Errorf("winter: purge dead: %w", err)
 	}
-	return result.(int64), nil
+	n, ok := result.(int64)
+	if !ok {
+		return 0, fmt.Errorf("winter: purge dead: unexpected result type %T", result)
+	}
+	return n, nil
 }
 
 // DeadCount returns the number of jobs in the dead letter queue.
@@ -465,7 +481,26 @@ func (q *Queue) DeadCount(ctx context.Context, queueName string) (int64, error) 
 	return q.rdb.LLen(ctx, deadKey(queueName)).Result()
 }
 
-func parseJobRecord(vals []interface{}) (*JobRecord, error) {
+func resultKey(jobID string) string { return "winter:job:" + jobID + ":result" }
+
+// SetResult stores a job result with a TTL.
+func (q *Queue) SetResult(ctx context.Context, jobID string, data []byte, ttl time.Duration) error {
+	return q.rdb.Set(ctx, resultKey(jobID), data, ttl).Err()
+}
+
+// GetResult retrieves a stored job result. Returns nil, nil if no result exists.
+func (q *Queue) GetResult(ctx context.Context, jobID string) ([]byte, error) {
+	data, err := q.rdb.Get(ctx, resultKey(jobID)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("winter: get result: %w", err)
+	}
+	return data, nil
+}
+
+func parseJobRecord(vals []any) (*JobRecord, error) {
 	m := make(map[string]string, len(vals)/2)
 	for i := 0; i < len(vals)-1; i += 2 {
 		key, _ := vals[i].(string)

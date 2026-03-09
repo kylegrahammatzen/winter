@@ -144,13 +144,14 @@ redis.call("ZREM", leaseKey, id)
 
 local attempt = redis.call("HINCRBY", jobKey, "attempt", 1)
 redis.call("HSET", jobKey, "last_error", errorMsg)
+redis.call("HINCRBY", statsKey, "failed", 1)
 
 local maxRetries = tonumber(redis.call("HGET", jobKey, "max_retries"))
 
 if skipRetry == 1 or attempt >= maxRetries then
     redis.call("LPUSH", deadKey, id)
     redis.call("HSET", jobKey, "state", "dead")
-    redis.call("HINCRBY", statsKey, "dead", 1)
+    redis.call("HINCRBY", statsKey, "dead_total", 1)
 
     local uk = redis.call("HGET", jobKey, "unique_key")
     if uk and uk ~= "" then
@@ -184,7 +185,7 @@ redis.call("SREM", activeKey, id)
 redis.call("SREM", workerJobsKey, id)
 redis.call("ZREM", leaseKey, id)
 redis.call("ZADD", delayedKey, newTimestamp, id)
-redis.call("HSET", jobKey, "state", "pending", "scheduled_at", newTimestamp)
+redis.call("HSET", jobKey, "state", "pending", "scheduled_at", newTimestamp, "started_at", 0)
 return 1
 `)
 
@@ -203,6 +204,15 @@ redis.call("SREM", activeKey, id)
 redis.call("SREM", workerJobsKey, id)
 redis.call("ZREM", leaseKey, id)
 redis.call("HSET", jobKey, "state", "cancelled", "completed_at", now, "last_error", reason)
+
+local uk = redis.call("HGET", jobKey, "unique_key")
+if uk and uk ~= "" then
+    local owner = redis.call("GET", uk)
+    if owner == id then
+        redis.call("DEL", uk)
+    end
+end
+
 return 1
 `)
 
@@ -240,9 +250,9 @@ for _, id in ipairs(expired) do
     if removed == 1 then
         redis.call("ZREM", leaseKey, id)
         local jobKey = "winter:job:" .. id
-        local priority = tonumber(redis.call("HGET", jobKey, "priority"))
+        local priority = tonumber(redis.call("HGET", jobKey, "priority")) or 5
         redis.call("ZADD", readyKey, priority, id)
-        redis.call("HSET", jobKey, "state", "pending")
+        redis.call("HSET", jobKey, "state", "pending", "started_at", 0)
         table.insert(recovered, id)
     else
         redis.call("ZREM", leaseKey, id)
@@ -269,7 +279,7 @@ end
 for _, id in ipairs(jobs) do
     redis.call("ZREM", delayedKey, id)
     local jobKey = "winter:job:" .. id
-    local priority = tonumber(redis.call("HGET", jobKey, "priority"))
+    local priority = tonumber(redis.call("HGET", jobKey, "priority")) or 5
     redis.call("ZADD", readyKey, priority, id)
     redis.call("HSET", jobKey, "state", "pending")
 end
@@ -292,8 +302,8 @@ if removed == 0 then
     return 0
 end
 
-local priority = tonumber(redis.call("HGET", jobKey, "priority"))
-redis.call("HSET", jobKey, "state", "pending", "attempt", 0, "last_error", "", "completed_at", 0)
+local priority = tonumber(redis.call("HGET", jobKey, "priority")) or 5
+redis.call("HSET", jobKey, "state", "pending", "attempt", 0, "last_error", "", "completed_at", 0, "started_at", 0)
 redis.call("ZADD", readyKey, priority, id)
 redis.call("HINCRBY", statsKey, "retried", 1)
 return 1
