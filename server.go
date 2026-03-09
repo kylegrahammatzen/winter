@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -48,9 +49,12 @@ type CronEntry struct {
 }
 
 // ServerConfig controls concurrency, queue weights, poll interval, and logging.
+// When StrictPriority is true, queues are polled in descending weight order
+// and lower-priority queues are only checked when all higher ones are empty.
 type ServerConfig struct {
 	Concurrency     int
 	Queues          []QueueWeight
+	StrictPriority  bool
 	Cron            []CronEntry
 	PollInterval    time.Duration
 	ShutdownTimeout time.Duration
@@ -335,9 +339,18 @@ func (s *Server) Stop() {
 	}
 }
 
-// pollLoop cycles through the weighted queue list, dequeuing jobs and dispatching
-// them to handlers bounded by the concurrency semaphore.
+// pollLoop cycles through the queue list, dequeuing jobs and dispatching
+// them to handlers bounded by the concurrency semaphore. In strict mode
+// higher-weight queues are always drained before lower ones.
 func (s *Server) pollLoop(ctx context.Context, sem chan struct{}) {
+	if s.cfg.StrictPriority {
+		s.pollStrict(ctx, sem)
+	} else {
+		s.pollWeighted(ctx, sem)
+	}
+}
+
+func (s *Server) pollWeighted(ctx context.Context, sem chan struct{}) {
 	queueNames := s.buildWeightedQueues()
 
 	for {
@@ -374,6 +387,58 @@ func (s *Server) pollLoop(ctx context.Context, sem chan struct{}) {
 				defer func() { <-sem }()
 				s.processJob(ctx, rec)
 			}(rec)
+		}
+
+		if !fetched {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(s.cfg.PollInterval):
+			}
+		}
+	}
+}
+
+func (s *Server) pollStrict(ctx context.Context, sem chan struct{}) {
+	queueNames := s.buildStrictQueues()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		fetched := false
+		for _, queueName := range queueNames {
+			select {
+			case <-ctx.Done():
+				return
+			case sem <- struct{}{}:
+			}
+
+			rec, err := s.client.queue.Dequeue(ctx, queueName, s.workerID)
+			if err != nil {
+				s.logger.Error("winter: dequeue error", "queue", queueName, "error", err)
+				<-sem
+				continue
+			}
+
+			if rec == nil {
+				<-sem
+				continue
+			}
+
+			fetched = true
+			s.wg.Add(1)
+			go func(rec *queue.JobRecord) {
+				defer s.wg.Done()
+				defer func() { <-sem }()
+				s.processJob(ctx, rec)
+			}(rec)
+
+			// Restart from the highest-priority queue after each successful dequeue.
+			break
 		}
 
 		if !fetched {
@@ -586,4 +651,19 @@ func (s *Server) buildWeightedQueues() []string {
 		}
 	}
 	return queues
+}
+
+// buildStrictQueues returns queue names sorted by weight descending for
+// strict priority polling where higher-weight queues are always drained first.
+func (s *Server) buildStrictQueues() []string {
+	sorted := make([]QueueWeight, len(s.cfg.Queues))
+	copy(sorted, s.cfg.Queues)
+	slices.SortFunc(sorted, func(a, b QueueWeight) int {
+		return b.Weight - a.Weight
+	})
+	names := make([]string, len(sorted))
+	for i, qw := range sorted {
+		names[i] = qw.Name
+	}
+	return names
 }

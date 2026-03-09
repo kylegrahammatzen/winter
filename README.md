@@ -7,7 +7,7 @@ Winter is an open-source distributed task queue for Go, backed by Redis. With Wi
 - Generics-first type safety (your struct is the task, no `[]byte` payloads)
 - Workflow primitives (Chain, Group, Chord)
 - Standalone gRPC server for language-agnostic workers
-- Priority queues with weighted dequeue
+- Priority queues with weighted and strict modes
 - Delayed, scheduled, and cron jobs
 - Retries with configurable backoff (exponential, linear, fixed)
 - Dead letter queue with inspection and retry
@@ -75,6 +75,18 @@ winter.HandleFunc(server, func(ctx context.Context, job *winter.Job[SendEmail]) 
 server.Use(winter.Recover())
 server.Start()
 ```
+
+By default, queues use weighted polling where higher-weight queues get proportionally more attention. Enable strict mode to always drain higher-priority queues first:
+
+```go
+server, _ := winter.NewServer(redisCfg, winter.ServerConfig{
+    Concurrency:    20,
+    Queues:         winter.Queues("critical", 6, "default", 3, "low", 1),
+    StrictPriority: true,
+})
+```
+
+In strict mode, `low` jobs will only be processed when `critical` and `default` are both empty.
 
 ### Workflows
 
