@@ -289,6 +289,67 @@ func TestBatchEnqueue(t *testing.T) {
 	assert.Equal(t, int64(1000), stats["ready"])
 }
 
+// Simulates a worker dying mid-processing: worker-1 dequeues 5 jobs and
+// never acks them, then recovery moves them back to ready and worker-2
+// processes all of them successfully.
+func TestWorkerDeathRecovery(t *testing.T) {
+	_, q := setupRedis(t)
+	ctx := context.Background()
+
+	for i := range 5 {
+		job := &queue.JobRecord{
+			ID:         fmt.Sprintf("death-%d", i),
+			Kind:       "test.job",
+			Queue:      "default",
+			Priority:   5,
+			State:      "pending",
+			Payload:    []byte(fmt.Sprintf(`{"i":%d}`, i)),
+			MaxRetries: 3,
+			CreatedAt:  time.Now().UnixMilli(),
+		}
+		require.NoError(t, q.Enqueue(ctx, job, "", 0))
+	}
+
+	// Worker-1 dequeues all 5 but "dies" without acking.
+	for range 5 {
+		rec, err := q.Dequeue(ctx, "default", "doomed-worker")
+		require.NoError(t, err)
+		require.NotNil(t, rec)
+	}
+
+	stats, err := q.QueueStats(ctx, "default")
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), stats["active"])
+	assert.Equal(t, int64(0), stats["ready"])
+
+	// Simulate lease expiry.
+	futureMs := time.Now().Add(31 * time.Second).UnixMilli()
+	recovered, err := q.RecoverExpiredLeasesAt(ctx, "default", 100, futureMs)
+	require.NoError(t, err)
+	assert.Len(t, recovered, 5)
+
+	// Worker-2 picks up all recovered jobs and processes them.
+	var processed int
+	for {
+		rec, err := q.Dequeue(ctx, "default", "healthy-worker")
+		require.NoError(t, err)
+		if rec == nil {
+			break
+		}
+		err = q.Ack(ctx, "default", rec.ID, "healthy-worker")
+		require.NoError(t, err)
+		processed++
+	}
+
+	assert.Equal(t, 5, processed)
+
+	stats, err = q.QueueStats(ctx, "default")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), stats["ready"])
+	assert.Equal(t, int64(0), stats["active"])
+	assert.Equal(t, int64(5), stats["completed"])
+}
+
 // Verifies unique job deduplication against real Redis.
 func TestUniqueJobDedup(t *testing.T) {
 	_, q := setupRedis(t)

@@ -130,6 +130,52 @@ func BenchmarkBatchEnqueue1000(b *testing.B) {
 	}
 }
 
+// BenchmarkEndToEndMultiQueue measures weighted multi-queue polling where
+// jobs are spread across three queues with different weights.
+func BenchmarkEndToEndMultiQueue(b *testing.B) {
+	q := benchSetup(b)
+	ctx := context.Background()
+
+	queues := []struct {
+		name   string
+		weight int
+	}{
+		{"critical", 3},
+		{"default", 2},
+		{"low", 1},
+	}
+
+	// Expand weights into the same flat list the server uses for polling.
+	var weighted []string
+	for _, qw := range queues {
+		for range qw.weight {
+			weighted = append(weighted, qw.name)
+		}
+	}
+
+	for i := range b.N {
+		queueName := queues[i%len(queues)].name
+		job := benchJob(fmt.Sprintf("mq-%d", i))
+		job.Queue = queueName
+		_ = q.Enqueue(ctx, job, "", 0)
+	}
+
+	b.ResetTimer()
+	processed := 0
+	for processed < b.N {
+		for _, queueName := range weighted {
+			rec, _ := q.Dequeue(ctx, queueName, "worker-bench")
+			if rec != nil {
+				_ = q.Ack(ctx, queueName, rec.ID, "worker-bench")
+				processed++
+				if processed >= b.N {
+					break
+				}
+			}
+		}
+	}
+}
+
 func BenchmarkEndToEndParallel(b *testing.B) {
 	q := benchSetup(b)
 	ctx := context.Background()
