@@ -67,14 +67,19 @@ return redis.call("SCARD", depsKey)
 `)
 
 func (m *Manager) advanceChord(ctx context.Context, rec *Record, jobID string) error {
-	remaining, err := advanceChordScript.Run(ctx, m.rdb, []string{depsKey(rec.ID)}, jobID).Result()
+	result, err := advanceChordScript.Run(ctx, m.rdb, []string{depsKey(rec.ID)}, jobID).Result()
 	if err != nil {
 		return fmt.Errorf("winter: chord advance: %w", err)
 	}
 
-	rec.Done++
+	remaining, ok := result.(int64)
+	if !ok {
+		return fmt.Errorf("winter: chord advance: unexpected result type %T", result)
+	}
 
-	if remaining.(int64) == 0 {
+	rec.Done = rec.Total - int(remaining)
+
+	if remaining == 0 {
 		rec.State = "completed"
 		if err := m.saveRecord(ctx, rec); err != nil {
 			return err

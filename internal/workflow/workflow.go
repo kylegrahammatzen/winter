@@ -16,6 +16,7 @@ import (
 
 func workflowKey(id string) string { return "winter:workflow:" + id }
 func depsKey(id string) string     { return "winter:workflow:" + id + ":deps" }
+func counterKey(id string) string  { return "winter:workflow:" + id + ":counter" }
 
 // WorkflowType identifies the kind of workflow.
 type WorkflowType string
@@ -66,7 +67,7 @@ func (m *Manager) saveRecord(ctx context.Context, rec *Record) error {
 	if err != nil {
 		return fmt.Errorf("winter: marshal workflow: %w", err)
 	}
-	return m.rdb.Set(ctx, workflowKey(rec.ID), string(data), 24*time.Hour).Err()
+	return m.rdb.Set(ctx, workflowKey(rec.ID), string(data), 7*24*time.Hour).Err()
 }
 
 func (m *Manager) loadRecord(ctx context.Context, workflowID string) (*Record, error) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 )
 
 // CreateChain enqueues the first task and stores the remaining tasks as pending
@@ -44,8 +45,20 @@ func (m *Manager) CreateChain(ctx context.Context, tasks []TaskSpec, queueName s
 	return id, nil
 }
 
+// advanceChainScript atomically increments the chain step counter and returns
+// the new value, ensuring exactly one server advances each step.
+var advanceChainScript = redis.NewScript(`
+local counterKey = KEYS[1]
+return redis.call("INCR", counterKey)
+`)
+
 func (m *Manager) advanceChain(ctx context.Context, rec *Record) error {
-	rec.Current++
+	current, err := advanceChainScript.Run(ctx, m.rdb, []string{counterKey(rec.ID)}).Int64()
+	if err != nil {
+		return fmt.Errorf("winter: chain advance: %w", err)
+	}
+
+	rec.Current = int(current)
 
 	if rec.Current >= rec.Total {
 		rec.State = "completed"

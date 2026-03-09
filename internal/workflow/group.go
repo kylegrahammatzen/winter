@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 )
 
 // CreateGroup enqueues all tasks immediately for parallel execution and tracks
@@ -45,9 +46,20 @@ func (m *Manager) CreateGroup(ctx context.Context, tasks []TaskSpec, queueName s
 	return id, nil
 }
 
-func (m *Manager) advanceGroup(ctx context.Context, rec *Record) error {
-	rec.Done++
+// advanceGroupScript atomically increments the group counter and returns the
+// new count. This prevents two concurrent completions from losing an increment.
+var advanceGroupScript = redis.NewScript(`
+local counterKey = KEYS[1]
+return redis.call("INCR", counterKey)
+`)
 
+func (m *Manager) advanceGroup(ctx context.Context, rec *Record) error {
+	done, err := advanceGroupScript.Run(ctx, m.rdb, []string{counterKey(rec.ID)}).Int64()
+	if err != nil {
+		return fmt.Errorf("winter: group advance: %w", err)
+	}
+
+	rec.Done = int(done)
 	if rec.Done >= rec.Total {
 		rec.State = "completed"
 	}
