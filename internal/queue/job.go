@@ -1,5 +1,6 @@
 package queue
 
+// JobRecord is the flat representation of a job stored in a Redis hash.
 type JobRecord struct {
 	ID          string `redis:"id"`
 	Kind        string `redis:"kind"`
@@ -14,4 +15,5 @@ type JobRecord struct {
 	StartedAt   int64  `redis:"started_at"`
 	CompletedAt int64  `redis:"completed_at"`
 	LastError   string `redis:"last_error"`
+	UniqueKey   string `redis:"unique_key"`
 }

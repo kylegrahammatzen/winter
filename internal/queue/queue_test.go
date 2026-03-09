@@ -36,6 +36,7 @@ func makeJob(id, kind, queue string, priority int) *JobRecord {
 	}
 }
 
+// Enqueues a job and verifies all fields survive the round trip through Redis.
 func TestEnqueueAndDequeue(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
@@ -56,6 +57,7 @@ func TestEnqueueAndDequeue(t *testing.T) {
 	assert.Equal(t, 3, rec.MaxRetries)
 }
 
+// Dequeue from an empty queue returns nil without error.
 func TestDequeueEmpty(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
@@ -65,6 +67,7 @@ func TestDequeueEmpty(t *testing.T) {
 	assert.Nil(t, rec)
 }
 
+// Enqueues jobs with priorities 10, 0, 5 and verifies dequeue order is 0, 5, 10.
 func TestPriorityOrdering(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
@@ -89,6 +92,7 @@ func TestPriorityOrdering(t *testing.T) {
 	assert.Equal(t, "high", third.ID)
 }
 
+// Acks a job and verifies its state becomes completed with a timestamp.
 func TestAck(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
@@ -107,6 +111,7 @@ func TestAck(t *testing.T) {
 	assert.NotZero(t, job.CompletedAt)
 }
 
+// Nacks a job with retries remaining and verifies it moves to the delayed set.
 func TestNackWithRetry(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
@@ -126,6 +131,7 @@ func TestNackWithRetry(t *testing.T) {
 	assert.Equal(t, "connection timeout", job.LastError)
 }
 
+// Nacks a job that has exhausted retries and verifies it goes to the dead list.
 func TestNackExhaustedRetries(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
@@ -146,6 +152,7 @@ func TestNackExhaustedRetries(t *testing.T) {
 	assert.Equal(t, "dead", rec.State)
 }
 
+// Nacks a job with skipRetry and verifies it goes directly to dead.
 func TestNackSkipRetry(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
@@ -159,6 +166,7 @@ func TestNackSkipRetry(t *testing.T) {
 	assert.Equal(t, "dead", result)
 }
 
+// Reschedules an active job and verifies it moves back to delayed with a new timestamp.
 func TestReschedule(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
@@ -177,6 +185,7 @@ func TestReschedule(t *testing.T) {
 	assert.NotZero(t, job.ScheduledAt)
 }
 
+// Cancels an active job and verifies its state and reason are stored.
 func TestCancel(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
@@ -194,6 +203,7 @@ func TestCancel(t *testing.T) {
 	assert.Equal(t, "resource deleted", job.LastError)
 }
 
+// Enqueues a delayed job, verifies it is not dequeueable, promotes it, then dequeues.
 func TestDelayedEnqueueAndPromote(t *testing.T) {
 	q, mr := setup(t)
 	ctx := context.Background()
@@ -218,6 +228,7 @@ func TestDelayedEnqueueAndPromote(t *testing.T) {
 	assert.Equal(t, "delayed-1", rec.ID)
 }
 
+// Pauses a queue, verifies dequeue returns nil, resumes, and dequeues successfully.
 func TestPauseResume(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
@@ -238,6 +249,7 @@ func TestPauseResume(t *testing.T) {
 	assert.Equal(t, "job-1", rec.ID)
 }
 
+// Enqueues a unique job and verifies the second enqueue with the same key is rejected.
 func TestUniqueJob(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
@@ -249,6 +261,94 @@ func TestUniqueJob(t *testing.T) {
 	require.ErrorIs(t, err, ErrDuplicate)
 }
 
+// Enqueues 1000 jobs in a single batch and verifies all are dequeueable.
+func TestBatchEnqueue(t *testing.T) {
+	q, _ := setup(t)
+	ctx := context.Background()
+
+	jobs := make([]*JobRecord, 1000)
+	for i := range jobs {
+		jobs[i] = makeJob(fmt.Sprintf("batch-%d", i), "batch.task", "default", 5)
+	}
+
+	err := q.EnqueueMany(ctx, jobs)
+	require.NoError(t, err)
+
+	stats, err := q.QueueStats(ctx, "default")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1000), stats["ready"])
+	assert.Equal(t, int64(1000), stats["enqueued"])
+}
+
+// Verifies that the unique key is deleted when a job is acked.
+func TestUniqueKeyCleanupOnAck(t *testing.T) {
+	q, _ := setup(t)
+	ctx := context.Background()
+
+	err := q.Enqueue(ctx, makeJob("job-1", "test", "default", 5), "test:uniq1", 60*time.Second)
+	require.NoError(t, err)
+
+	// Same unique key should be rejected.
+	err = q.Enqueue(ctx, makeJob("job-2", "test", "default", 5), "test:uniq1", 60*time.Second)
+	require.ErrorIs(t, err, ErrDuplicate)
+
+	rec, err := q.Dequeue(ctx, "default", "worker-1")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+
+	err = q.Ack(ctx, "default", rec.ID, "worker-1")
+	require.NoError(t, err)
+
+	// After ack, the unique key should be freed.
+	err = q.Enqueue(ctx, makeJob("job-3", "test", "default", 5), "test:uniq1", 60*time.Second)
+	require.NoError(t, err)
+}
+
+// Verifies that the unique key is deleted when a job goes to the dead letter queue.
+func TestUniqueKeyCleanupOnDead(t *testing.T) {
+	q, _ := setup(t)
+	ctx := context.Background()
+
+	job := makeJob("job-1", "test", "default", 5)
+	job.MaxRetries = 1
+	err := q.Enqueue(ctx, job, "test:uniq2", 60*time.Second)
+	require.NoError(t, err)
+
+	_, err = q.Dequeue(ctx, "default", "worker-1")
+	require.NoError(t, err)
+
+	result, err := q.Nack(ctx, "default", "job-1", "worker-1", "fatal error", 0, false)
+	require.NoError(t, err)
+	assert.Equal(t, "dead", result)
+
+	// After dead, the unique key should be freed.
+	err = q.Enqueue(ctx, makeJob("job-2", "test", "default", 5), "test:uniq2", 60*time.Second)
+	require.NoError(t, err)
+}
+
+// Verifies that the unique key is NOT deleted on retry so duplicates are still prevented.
+func TestUniqueKeyPreservedOnRetry(t *testing.T) {
+	q, _ := setup(t)
+	ctx := context.Background()
+
+	job := makeJob("job-1", "test", "default", 5)
+	job.MaxRetries = 5
+	err := q.Enqueue(ctx, job, "test:uniq3", 60*time.Second)
+	require.NoError(t, err)
+
+	_, err = q.Dequeue(ctx, "default", "worker-1")
+	require.NoError(t, err)
+
+	result, err := q.Nack(ctx, "default", "job-1", "worker-1", "transient error", 1000, false)
+	require.NoError(t, err)
+	assert.Equal(t, "retry", result)
+
+	// Unique key should still be held since the job is retrying.
+	err = q.Enqueue(ctx, makeJob("job-2", "test", "default", 5), "test:uniq3", 60*time.Second)
+	require.ErrorIs(t, err, ErrDuplicate)
+}
+
+// Enqueues and dequeues 50 jobs concurrently and verifies none are lost.
 func TestConcurrentEnqueueDequeue(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()

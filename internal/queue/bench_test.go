@@ -111,6 +111,25 @@ func BenchmarkEndToEnd(b *testing.B) {
 	}
 }
 
+// BenchmarkBatchEnqueue1000 measures pipelined insertion of 1000 jobs per iteration.
+func BenchmarkBatchEnqueue1000(b *testing.B) {
+	q, _ := benchSetup(b)
+	ctx := context.Background()
+
+	jobs := make([]*JobRecord, 1000)
+	for i := range jobs {
+		jobs[i] = benchJob(fmt.Sprintf("batch-%d", i), 5)
+	}
+
+	b.ResetTimer()
+	for range b.N {
+		for i, job := range jobs {
+			job.ID = fmt.Sprintf("batch-%d-%d", b.N, i)
+		}
+		_ = q.EnqueueMany(ctx, jobs)
+	}
+}
+
 func BenchmarkEndToEndParallel(b *testing.B) {
 	q, _ := benchSetup(b)
 	ctx := context.Background()
