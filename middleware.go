@@ -5,10 +5,14 @@ import (
 	"fmt"
 )
 
+// Middleware wraps a handler to add cross-cutting behavior like panic recovery or logging.
 type Middleware func(next HandlerFn) HandlerFn
 
+// HandlerFn is the untyped handler signature used internally by the middleware chain.
 type HandlerFn func(ctx context.Context, job *rawJob) error
 
+// rawJob holds the deserialized Redis hash fields before they are converted
+// into a typed Job[T] by the registered handler.
 type rawJob struct {
 	ID          string
 	Kind        string
@@ -24,6 +28,7 @@ type rawJob struct {
 	LastError   string
 }
 
+// Recover returns a middleware that catches panics and converts them to errors.
 func Recover() Middleware {
 	return func(next HandlerFn) HandlerFn {
 		return func(ctx context.Context, job *rawJob) (err error) {

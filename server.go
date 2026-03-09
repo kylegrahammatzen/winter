@@ -14,14 +14,17 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/kylegrahammatzen/winter/internal/queue"
+	"github.com/kylegrahammatzen/winter/internal/worker"
 	"github.com/redis/go-redis/v9"
 )
 
+// QueueWeight pairs a queue name with its relative polling weight.
 type QueueWeight struct {
 	Name   string
 	Weight int
 }
 
+// Queues builds a weighted queue list from alternating name/weight pairs.
 func Queues(args ...interface{}) []QueueWeight {
 	var queues []QueueWeight
 	for i := 0; i < len(args)-1; i += 2 {
@@ -32,11 +35,13 @@ func Queues(args ...interface{}) []QueueWeight {
 	return queues
 }
 
+// ServerConfig controls concurrency, queue weights, poll interval, and logging.
 type ServerConfig struct {
-	Concurrency  int
-	Queues       []QueueWeight
-	PollInterval time.Duration
-	Logger       *slog.Logger
+	Concurrency     int
+	Queues          []QueueWeight
+	PollInterval    time.Duration
+	ShutdownTimeout time.Duration
+	Logger          *slog.Logger
 }
 
 type handlerEntry struct {
@@ -44,6 +49,8 @@ type handlerEntry struct {
 	handler HandlerFn
 }
 
+// Server polls queues, dispatches jobs to registered handlers, and manages
+// the worker lifecycle including graceful shutdown.
 type Server struct {
 	client     *Client
 	cfg        ServerConfig
@@ -55,6 +62,7 @@ type Server struct {
 	wg         sync.WaitGroup
 }
 
+// NewServer connects to Redis and returns a server ready to process jobs.
 func NewServer(redisCfg RedisConfig, cfg ServerConfig) (*Server, error) {
 	client, err := NewClient(redisCfg)
 	if err != nil {
@@ -63,6 +71,7 @@ func NewServer(redisCfg RedisConfig, cfg ServerConfig) (*Server, error) {
 	return newServer(client, cfg), nil
 }
 
+// NewServerFromRedis creates a server from an existing Redis connection.
 func NewServerFromRedis(rdb redis.UniversalClient, cfg ServerConfig) *Server {
 	client := NewClientFromRedis(rdb)
 	return newServer(client, cfg)
@@ -78,6 +87,9 @@ func newServer(client *Client, cfg ServerConfig) *Server {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 200 * time.Millisecond
 	}
+	if cfg.ShutdownTimeout <= 0 {
+		cfg.ShutdownTimeout = 30 * time.Second
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -91,6 +103,7 @@ func newServer(client *Client, cfg ServerConfig) *Server {
 	}
 }
 
+// Handle registers a typed handler for its task kind on the server.
 func Handle[T Task](s *Server, h Handler[T]) {
 	var zero T
 	kind := zero.Kind()
@@ -120,14 +133,19 @@ func Handle[T Task](s *Server, h Handler[T]) {
 	}
 }
 
+// HandleFunc registers a function as a handler for its task kind.
 func HandleFunc[T Task](s *Server, fn func(ctx context.Context, job *Job[T]) error) {
 	Handle(s, HandlerFunc[T](fn))
 }
 
+// Use appends middleware to the server's handler chain.
 func (s *Server) Use(mw ...Middleware) {
 	s.middleware = append(s.middleware, mw...)
 }
 
+// Start begins polling queues and blocks until a shutdown signal is received.
+// On shutdown it stops fetching new jobs, waits for in-flight jobs to finish
+// (up to ShutdownTimeout), deregisters the worker, and closes the connection.
 func (s *Server) Start() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
@@ -140,6 +158,11 @@ func (s *Server) Start() error {
 		"concurrency", s.cfg.Concurrency,
 		"queues", s.cfg.Queues,
 	)
+
+	// Initial heartbeat so recovery knows we exist.
+	if err := s.client.queue.Heartbeat(ctx, s.workerID); err != nil {
+		s.logger.Error("winter: initial heartbeat failed", "error", err)
+	}
 
 	sem := make(chan struct{}, s.cfg.Concurrency)
 
@@ -155,6 +178,27 @@ func (s *Server) Start() error {
 		s.promoteLoop(ctx)
 	}()
 
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.heartbeatLoop(ctx)
+	}()
+
+	queueNames := make([]string, len(s.cfg.Queues))
+	for i, qw := range s.cfg.Queues {
+		queueNames[i] = qw.Name
+	}
+
+	recovery := worker.NewRecovery(s.client.queue, worker.RecoveryConfig{
+		Queues: queueNames,
+		Logger: s.logger,
+	})
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		recovery.Run(ctx)
+	}()
+
 	select {
 	case <-sig:
 		s.logger.Info("winter: received shutdown signal")
@@ -162,17 +206,42 @@ func (s *Server) Start() error {
 	}
 
 	cancel()
-	s.wg.Wait()
-	s.logger.Info("winter: server stopped")
+
+	// Wait for in-flight jobs with a hard deadline.
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		s.logger.Info("winter: all in-flight jobs drained")
+	case <-time.After(s.cfg.ShutdownTimeout):
+		s.logger.Warn("winter: shutdown timeout reached, force stopping")
+	}
+
+	// Deregister worker so recovery does not try to recover our jobs
+	// that already completed.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := s.client.queue.DeregisterWorker(shutdownCtx, s.workerID); err != nil {
+		s.logger.Error("winter: deregister worker failed", "error", err)
+	}
+
+	s.logger.Info("winter: server stopped", "worker_id", s.workerID)
 	return nil
 }
 
+// Stop cancels the server context and begins graceful shutdown.
 func (s *Server) Stop() {
 	if s.cancel != nil {
 		s.cancel()
 	}
 }
 
+// pollLoop cycles through the weighted queue list, dequeuing jobs and dispatching
+// them to handlers bounded by the concurrency semaphore.
 func (s *Server) pollLoop(ctx context.Context, sem chan struct{}) {
 	queueNames := s.buildWeightedQueues()
 
@@ -222,6 +291,29 @@ func (s *Server) pollLoop(ctx context.Context, sem chan struct{}) {
 	}
 }
 
+// heartbeatLoop sends periodic heartbeats and extends leases for in-flight jobs
+// so the recovery goroutine does not reclaim them.
+func (s *Server) heartbeatLoop(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.client.queue.Heartbeat(ctx, s.workerID); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				s.logger.Error("winter: heartbeat failed", "error", err)
+			}
+		}
+	}
+}
+
+// promoteLoop periodically moves delayed jobs whose scheduled time has passed
+// back into the ready set.
 func (s *Server) promoteLoop(ctx context.Context) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -244,6 +336,9 @@ func (s *Server) promoteLoop(ctx context.Context) {
 	}
 }
 
+// processJob runs the middleware chain and handler for a single job, then acks,
+// nacks, reschedules, or cancels it based on the handler's return value. Every
+// job emits exactly one canonical log line with all context.
 func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 	start := time.Now()
 
@@ -346,6 +441,8 @@ func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 	}
 }
 
+// buildWeightedQueues expands queue weights into a flat list so higher-weight
+// queues appear more often in the poll rotation.
 func (s *Server) buildWeightedQueues() []string {
 	var queues []string
 	for _, qw := range s.cfg.Queues {
