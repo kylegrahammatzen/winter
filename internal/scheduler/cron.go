@@ -6,6 +6,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -107,8 +108,9 @@ func (c *Cron) seedNextRuns(ctx context.Context) {
 		state := cronState{NextRun: e.sched.Next(now).UnixMilli()}
 		data, _ := json.Marshal(state)
 
-		// HSETNX: only sets if the field does not already exist.
-		c.rdb.HSetNX(ctx, cronKey, e.Name, string(data))
+		if err := c.rdb.HSetNX(ctx, cronKey, e.Name, string(data)).Err(); err != nil {
+			c.cfg.Logger.Error("winter: cron seed failed", "entry", e.Name, "error", err)
+		}
 	}
 }
 
@@ -118,6 +120,9 @@ func (c *Cron) tick(ctx context.Context) {
 	for _, e := range c.entries {
 		raw, err := c.rdb.HGet(ctx, cronKey, e.Name).Result()
 		if err != nil {
+			if !errors.Is(err, redis.Nil) {
+				c.cfg.Logger.Error("winter: cron tick read failed", "entry", e.Name, "error", err)
+			}
 			continue
 		}
 
@@ -197,5 +202,9 @@ func (c *Cron) compareAndSwap(ctx context.Context, field, expected, newVal strin
 	if err != nil {
 		return false, err
 	}
-	return result.(int64) == 1, nil
+	n, ok := result.(int64)
+	if !ok {
+		return false, fmt.Errorf("winter: cron cas: unexpected result type %T", result)
+	}
+	return n == 1, nil
 }
