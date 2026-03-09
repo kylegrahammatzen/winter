@@ -67,6 +67,7 @@ func (q *Queue) Enqueue(ctx context.Context, job *JobRecord, uniqKey string, uni
 		job.CreatedAt,
 		job.ScheduledAt,
 		uniqueTTL,
+		job.WorkflowID,
 	).Result()
 
 	if err != nil {
@@ -129,6 +130,7 @@ func (q *Queue) enqueueBatch(ctx context.Context, jobs []*JobRecord) error {
 			job.CreatedAt,
 			job.ScheduledAt,
 			0,
+			job.WorkflowID,
 		)
 	}
 
@@ -397,6 +399,72 @@ func (q *Queue) GetJob(ctx context.Context, jobID string) (*JobRecord, error) {
 	return parseJobRecordFromMap(vals)
 }
 
+// ListDead returns a paginated slice of jobs from the dead letter queue.
+func (q *Queue) ListDead(ctx context.Context, queueName string, offset, limit int64) ([]*JobRecord, error) {
+	ids, err := q.rdb.LRange(ctx, deadKey(queueName), offset, offset+limit-1).Result()
+	if err != nil {
+		return nil, fmt.Errorf("winter: list dead: %w", err)
+	}
+
+	records := make([]*JobRecord, 0, len(ids))
+	for _, id := range ids {
+		rec, err := q.GetJob(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if rec != nil {
+			records = append(records, rec)
+		}
+	}
+	return records, nil
+}
+
+// PeekDead returns the first job in the dead letter queue without removing it.
+func (q *Queue) PeekDead(ctx context.Context, queueName string) (*JobRecord, error) {
+	ids, err := q.rdb.LRange(ctx, deadKey(queueName), 0, 0).Result()
+	if err != nil {
+		return nil, fmt.Errorf("winter: peek dead: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return q.GetJob(ctx, ids[0])
+}
+
+// RetryDead removes a job from the dead list, resets its attempt counter, and
+// re-enqueues it to the ready set.
+func (q *Queue) RetryDead(ctx context.Context, queueName string, jobID string) error {
+	keys := []string{
+		jobKey(jobID),
+		deadKey(queueName),
+		readyKey(queueName),
+		statsKey(queueName),
+	}
+
+	result, err := retryDeadScript.Run(ctx, q.rdb, keys, jobID).Result()
+	if err != nil {
+		return fmt.Errorf("winter: retry dead: %w", err)
+	}
+	if result.(int64) == 0 {
+		return fmt.Errorf("winter: job %s not found in dead queue", jobID)
+	}
+	return nil
+}
+
+// PurgeDead removes all jobs from the dead letter queue and deletes their hashes.
+func (q *Queue) PurgeDead(ctx context.Context, queueName string) (int64, error) {
+	result, err := purgeDeadScript.Run(ctx, q.rdb, []string{deadKey(queueName)}).Result()
+	if err != nil {
+		return 0, fmt.Errorf("winter: purge dead: %w", err)
+	}
+	return result.(int64), nil
+}
+
+// DeadCount returns the number of jobs in the dead letter queue.
+func (q *Queue) DeadCount(ctx context.Context, queueName string) (int64, error) {
+	return q.rdb.LLen(ctx, deadKey(queueName)).Result()
+}
+
 func parseJobRecord(vals []interface{}) (*JobRecord, error) {
 	m := make(map[string]string, len(vals)/2)
 	for i := 0; i < len(vals)-1; i += 2 {
@@ -431,5 +499,6 @@ func parseJobRecordFromMap(m map[string]string) (*JobRecord, error) {
 		CompletedAt: completedAt,
 		LastError:   m["last_error"],
 		UniqueKey:   m["unique_key"],
+		WorkflowID:  m["workflow_id"],
 	}, nil
 }

@@ -21,6 +21,7 @@ local maxRetries = tonumber(ARGV[7])
 local createdAt = ARGV[8]
 local scheduledAt = tonumber(ARGV[9])
 local uniqueTTL = tonumber(ARGV[10])
+local workflowID = ARGV[11]
 
 if uniqueKey ~= "" and uniqueTTL > 0 then
     local set = redis.call("SET", uniqueKey, id, "NX", "EX", uniqueTTL)
@@ -43,7 +44,8 @@ redis.call("HSET", jobKey,
     "started_at", 0,
     "completed_at", 0,
     "last_error", "",
-    "unique_key", uniqueKey)
+    "unique_key", uniqueKey,
+    "workflow_id", workflowID)
 
 if scheduledAt > 0 then
     redis.call("ZADD", delayedKey, scheduledAt, id)
@@ -273,4 +275,38 @@ for _, id in ipairs(jobs) do
 end
 
 return #jobs
+`)
+
+// retryDeadScript removes a job from the dead list, resets its attempt counter
+// and state, and re-enqueues it to the ready set at its original priority.
+var retryDeadScript = redis.NewScript(`
+local jobKey = KEYS[1]
+local deadKey = KEYS[2]
+local readyKey = KEYS[3]
+local statsKey = KEYS[4]
+
+local id = ARGV[1]
+
+local removed = redis.call("LREM", deadKey, 1, id)
+if removed == 0 then
+    return 0
+end
+
+local priority = tonumber(redis.call("HGET", jobKey, "priority"))
+redis.call("HSET", jobKey, "state", "pending", "attempt", 0, "last_error", "", "completed_at", 0)
+redis.call("ZADD", readyKey, priority, id)
+redis.call("HINCRBY", statsKey, "retried", 1)
+return 1
+`)
+
+// purgeDeadScript removes all jobs from the dead list and deletes their hashes.
+var purgeDeadScript = redis.NewScript(`
+local deadKey = KEYS[1]
+
+local ids = redis.call("LRANGE", deadKey, 0, -1)
+for _, id in ipairs(ids) do
+    redis.call("DEL", "winter:job:" .. id)
+end
+redis.call("DEL", deadKey)
+return #ids
 `)

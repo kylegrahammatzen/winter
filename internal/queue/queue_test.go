@@ -348,6 +348,144 @@ func TestUniqueKeyPreservedOnRetry(t *testing.T) {
 	require.ErrorIs(t, err, ErrDuplicate)
 }
 
+// Lists dead jobs with pagination and verifies ordering matches insertion order.
+func TestListDead(t *testing.T) {
+	q, _ := setup(t)
+	ctx := context.Background()
+
+	for i := range 5 {
+		job := makeJob(fmt.Sprintf("dead-%d", i), "test", "default", 5)
+		job.MaxRetries = 1
+		err := q.Enqueue(ctx, job, "", 0)
+		require.NoError(t, err)
+
+		_, err = q.Dequeue(ctx, "default", "worker-1")
+		require.NoError(t, err)
+
+		result, err := q.Nack(ctx, "default", fmt.Sprintf("dead-%d", i), "worker-1", "fail", 0, true)
+		require.NoError(t, err)
+		assert.Equal(t, "dead", result)
+	}
+
+	count, err := q.DeadCount(ctx, "default")
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), count)
+
+	// First page.
+	page1, err := q.ListDead(ctx, "default", 0, 3)
+	require.NoError(t, err)
+	assert.Len(t, page1, 3)
+
+	// Second page.
+	page2, err := q.ListDead(ctx, "default", 3, 3)
+	require.NoError(t, err)
+	assert.Len(t, page2, 2)
+}
+
+// Peeks at the first dead job without removing it.
+func TestPeekDead(t *testing.T) {
+	q, _ := setup(t)
+	ctx := context.Background()
+
+	rec, err := q.PeekDead(ctx, "default")
+	require.NoError(t, err)
+	assert.Nil(t, rec)
+
+	job := makeJob("job-1", "test", "default", 5)
+	job.MaxRetries = 1
+	err = q.Enqueue(ctx, job, "", 0)
+	require.NoError(t, err)
+
+	_, err = q.Dequeue(ctx, "default", "worker-1")
+	require.NoError(t, err)
+
+	_, err = q.Nack(ctx, "default", "job-1", "worker-1", "fail", 0, true)
+	require.NoError(t, err)
+
+	rec, err = q.PeekDead(ctx, "default")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	assert.Equal(t, "job-1", rec.ID)
+	assert.Equal(t, "dead", rec.State)
+}
+
+// Retries a dead job and verifies it moves back to the ready set with reset state.
+func TestRetryDead(t *testing.T) {
+	q, _ := setup(t)
+	ctx := context.Background()
+
+	job := makeJob("job-1", "test", "default", 5)
+	job.MaxRetries = 1
+	err := q.Enqueue(ctx, job, "", 0)
+	require.NoError(t, err)
+
+	_, err = q.Dequeue(ctx, "default", "worker-1")
+	require.NoError(t, err)
+
+	_, err = q.Nack(ctx, "default", "job-1", "worker-1", "fail", 0, true)
+	require.NoError(t, err)
+
+	count, err := q.DeadCount(ctx, "default")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+
+	err = q.RetryDead(ctx, "default", "job-1")
+	require.NoError(t, err)
+
+	count, err = q.DeadCount(ctx, "default")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), count)
+
+	rec, err := q.Dequeue(ctx, "default", "worker-2")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	assert.Equal(t, "job-1", rec.ID)
+	assert.Equal(t, "active", rec.State)
+	assert.Equal(t, 0, rec.Attempt)
+}
+
+// Retrying a nonexistent job returns an error.
+func TestRetryDeadNotFound(t *testing.T) {
+	q, _ := setup(t)
+	ctx := context.Background()
+
+	err := q.RetryDead(ctx, "default", "nonexistent")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found in dead queue")
+}
+
+// Purges all dead jobs and verifies the queue is empty and job hashes are deleted.
+func TestPurgeDead(t *testing.T) {
+	q, _ := setup(t)
+	ctx := context.Background()
+
+	for i := range 3 {
+		job := makeJob(fmt.Sprintf("dead-%d", i), "test", "default", 5)
+		job.MaxRetries = 1
+		err := q.Enqueue(ctx, job, "", 0)
+		require.NoError(t, err)
+
+		_, err = q.Dequeue(ctx, "default", "worker-1")
+		require.NoError(t, err)
+
+		_, err = q.Nack(ctx, "default", fmt.Sprintf("dead-%d", i), "worker-1", "fail", 0, true)
+		require.NoError(t, err)
+	}
+
+	purged, err := q.PurgeDead(ctx, "default")
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), purged)
+
+	count, err := q.DeadCount(ctx, "default")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), count)
+
+	// Job hashes should be deleted too.
+	rec, err := q.GetJob(ctx, "dead-0")
+	require.NoError(t, err)
+	assert.Nil(t, rec)
+}
+
 // Enqueues and dequeues 50 jobs concurrently and verifies none are lost.
 func TestConcurrentEnqueueDequeue(t *testing.T) {
 	q, _ := setup(t)

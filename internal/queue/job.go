@@ -16,4 +16,5 @@ type JobRecord struct {
 	CompletedAt int64  `redis:"completed_at"`
 	LastError   string `redis:"last_error"`
 	UniqueKey   string `redis:"unique_key"`
+	WorkflowID  string `redis:"workflow_id"`
 }
