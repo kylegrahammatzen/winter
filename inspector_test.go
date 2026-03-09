@@ -13,17 +13,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setupInspector(t *testing.T) (*Inspector, *queue.Queue, *miniredis.Miniredis) {
+func setupInspector(t *testing.T) (*Inspector, *queue.Queue) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { rdb.Close() })
 	insp := NewInspectorFromRedis(rdb)
 	q := queue.New(rdb)
-	return insp, q, mr
+	return insp, q
 }
 
-func enqueueTestJob(t *testing.T, q *queue.Queue, queueName, kind string, payload any) string {
+func enqueueTestJob(t *testing.T, q *queue.Queue, kind string, payload any) {
 	t.Helper()
 	data, err := json.Marshal(payload)
 	require.NoError(t, err)
@@ -31,7 +31,7 @@ func enqueueTestJob(t *testing.T, q *queue.Queue, queueName, kind string, payloa
 	rec := &queue.JobRecord{
 		ID:         id,
 		Kind:       kind,
-		Queue:      queueName,
+		Queue:      "default",
 		Priority:   5,
 		State:      "pending",
 		Payload:    data,
@@ -39,27 +39,26 @@ func enqueueTestJob(t *testing.T, q *queue.Queue, queueName, kind string, payloa
 		CreatedAt:  time.Now().UnixMilli(),
 	}
 	require.NoError(t, q.Enqueue(context.Background(), rec, "", 0))
-	return id
 }
 
-func dequeueAndNack(t *testing.T, q *queue.Queue, queueName, workerID string) string {
+func dequeueAndNack(t *testing.T, q *queue.Queue) string {
 	t.Helper()
 	ctx := context.Background()
-	rec, err := q.Dequeue(ctx, queueName, workerID)
+	rec, err := q.Dequeue(ctx, "default", "w1")
 	require.NoError(t, err)
 	require.NotNil(t, rec)
-	_, err = q.Nack(ctx, queueName, rec.ID, workerID, "test error", 0, true)
+	_, err = q.Nack(ctx, "default", rec.ID, "w1", "test error", 0, true)
 	require.NoError(t, err)
 	return rec.ID
 }
 
 // TestInspectorQueue verifies that Queue returns accurate depth counts.
 func TestInspectorQueue(t *testing.T) {
-	insp, q, _ := setupInspector(t)
+	insp, q := setupInspector(t)
 	ctx := context.Background()
 
-	enqueueTestJob(t, q, "default", "task.a", map[string]string{"k": "v"})
-	enqueueTestJob(t, q, "default", "task.b", map[string]string{"k": "v"})
+	enqueueTestJob(t, q, "task.a", map[string]string{"k": "v"})
+	enqueueTestJob(t, q, "task.b", map[string]string{"k": "v"})
 
 	info, err := insp.Queue(ctx, "default")
 	require.NoError(t, err)
@@ -72,14 +71,14 @@ func TestInspectorQueue(t *testing.T) {
 
 // TestInspectorDead verifies listing dead letter jobs with pagination.
 func TestInspectorDead(t *testing.T) {
-	insp, q, _ := setupInspector(t)
+	insp, q := setupInspector(t)
 	ctx := context.Background()
 
-	enqueueTestJob(t, q, "default", "task.fail", map[string]string{"seq": "1"})
-	enqueueTestJob(t, q, "default", "task.fail", map[string]string{"seq": "2"})
+	enqueueTestJob(t, q, "task.fail", map[string]string{"seq": "1"})
+	enqueueTestJob(t, q, "task.fail", map[string]string{"seq": "2"})
 
-	dequeueAndNack(t, q, "default", "w1")
-	dequeueAndNack(t, q, "default", "w1")
+	dequeueAndNack(t, q)
+	dequeueAndNack(t, q)
 
 	jobs, err := insp.Dead(ctx, "default", 0, 10)
 	require.NoError(t, err)
@@ -92,15 +91,15 @@ func TestInspectorDead(t *testing.T) {
 
 // TestInspectorPeekDead returns the first dead job without removing it.
 func TestInspectorPeekDead(t *testing.T) {
-	insp, q, _ := setupInspector(t)
+	insp, q := setupInspector(t)
 	ctx := context.Background()
 
 	empty, err := insp.PeekDead(ctx, "default")
 	require.NoError(t, err)
 	assert.Nil(t, empty)
 
-	enqueueTestJob(t, q, "default", "task.peek", map[string]string{"v": "1"})
-	dequeueAndNack(t, q, "default", "w1")
+	enqueueTestJob(t, q, "task.peek", map[string]string{"v": "1"})
+	dequeueAndNack(t, q)
 
 	job, err := insp.PeekDead(ctx, "default")
 	require.NoError(t, err)
@@ -110,15 +109,15 @@ func TestInspectorPeekDead(t *testing.T) {
 
 // TestInspectorDeadCount returns the correct dead queue length.
 func TestInspectorDeadCount(t *testing.T) {
-	insp, q, _ := setupInspector(t)
+	insp, q := setupInspector(t)
 	ctx := context.Background()
 
 	count, err := insp.DeadCount(ctx, "default")
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), count)
 
-	enqueueTestJob(t, q, "default", "task.count", nil)
-	dequeueAndNack(t, q, "default", "w1")
+	enqueueTestJob(t, q, "task.count", nil)
+	dequeueAndNack(t, q)
 
 	count, err = insp.DeadCount(ctx, "default")
 	require.NoError(t, err)
@@ -127,11 +126,11 @@ func TestInspectorDeadCount(t *testing.T) {
 
 // TestInspectorRetry moves a dead job back to the ready set.
 func TestInspectorRetry(t *testing.T) {
-	insp, q, _ := setupInspector(t)
+	insp, q := setupInspector(t)
 	ctx := context.Background()
 
-	enqueueTestJob(t, q, "default", "task.retry", nil)
-	jobID := dequeueAndNack(t, q, "default", "w1")
+	enqueueTestJob(t, q, "task.retry", nil)
+	jobID := dequeueAndNack(t, q)
 
 	count, err := insp.DeadCount(ctx, "default")
 	require.NoError(t, err)
@@ -150,12 +149,12 @@ func TestInspectorRetry(t *testing.T) {
 
 // TestInspectorPurgeDead removes all dead jobs and returns the count.
 func TestInspectorPurgeDead(t *testing.T) {
-	insp, q, _ := setupInspector(t)
+	insp, q := setupInspector(t)
 	ctx := context.Background()
 
 	for i := 0; i < 3; i++ {
-		enqueueTestJob(t, q, "default", "task.purge", nil)
-		dequeueAndNack(t, q, "default", "w1")
+		enqueueTestJob(t, q, "task.purge", nil)
+		dequeueAndNack(t, q)
 	}
 
 	purged, err := insp.PurgeDead(ctx, "default")
@@ -170,10 +169,10 @@ func TestInspectorPurgeDead(t *testing.T) {
 // TestInspectorPauseResume verifies that pausing prevents dequeue and
 // resuming allows it again.
 func TestInspectorPauseResume(t *testing.T) {
-	insp, q, _ := setupInspector(t)
+	insp, q := setupInspector(t)
 	ctx := context.Background()
 
-	enqueueTestJob(t, q, "default", "task.pause", nil)
+	enqueueTestJob(t, q, "task.pause", nil)
 
 	require.NoError(t, insp.Pause(ctx, "default"))
 

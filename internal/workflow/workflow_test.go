@@ -11,13 +11,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setup(t *testing.T) (*Manager, *queue.Queue, *miniredis.Miniredis) {
+func setup(t *testing.T) (*Manager, *queue.Queue) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { rdb.Close() })
 	q := queue.New(rdb)
-	return NewManager(q, rdb), q, mr
+	return NewManager(q, rdb), q
 }
 
 func spec(kind string) TaskSpec {
@@ -31,7 +31,7 @@ func spec(kind string) TaskSpec {
 // Creates a chain of 3 tasks, completes each in order, and verifies the next
 // step is enqueued only after the previous one finishes.
 func TestChainSequentialExecution(t *testing.T) {
-	m, q, _ := setup(t)
+	m, q := setup(t)
 	ctx := context.Background()
 
 	wfID, err := m.CreateChain(ctx, []TaskSpec{
@@ -89,7 +89,7 @@ func TestChainSequentialExecution(t *testing.T) {
 
 // Creates a chain and fails the first task, verifying the chain stops.
 func TestChainStopsOnFailure(t *testing.T) {
-	m, q, _ := setup(t)
+	m, q := setup(t)
 	ctx := context.Background()
 
 	wfID, err := m.CreateChain(ctx, []TaskSpec{
@@ -117,7 +117,7 @@ func TestChainStopsOnFailure(t *testing.T) {
 
 // Creates a group of 3 tasks and verifies all are enqueued immediately.
 func TestGroupParallelEnqueue(t *testing.T) {
-	m, q, _ := setup(t)
+	m, q := setup(t)
 	ctx := context.Background()
 
 	wfID, err := m.CreateGroup(ctx, []TaskSpec{
@@ -151,7 +151,7 @@ func TestGroupParallelEnqueue(t *testing.T) {
 
 // Group is not complete until all tasks finish.
 func TestGroupPartialCompletion(t *testing.T) {
-	m, q, _ := setup(t)
+	m, q := setup(t)
 	ctx := context.Background()
 
 	wfID, err := m.CreateGroup(ctx, []TaskSpec{
@@ -174,7 +174,7 @@ func TestGroupPartialCompletion(t *testing.T) {
 
 // Creates a chord with 3 headers and a callback. Completing all headers fires the callback.
 func TestChordFiresCallback(t *testing.T) {
-	m, q, _ := setup(t)
+	m, q := setup(t)
 	ctx := context.Background()
 
 	wfID, err := m.CreateChord(ctx, []TaskSpec{
@@ -214,7 +214,7 @@ func TestChordFiresCallback(t *testing.T) {
 
 // Chord callback does not fire if only some headers are complete.
 func TestChordPartialDoesNotFireCallback(t *testing.T) {
-	m, q, _ := setup(t)
+	m, q := setup(t)
 	ctx := context.Background()
 
 	wfID, err := m.CreateChord(ctx, []TaskSpec{
@@ -248,7 +248,7 @@ func TestChordPartialDoesNotFireCallback(t *testing.T) {
 
 // Chord with a failed header marks the workflow as failed and does not fire the callback.
 func TestChordFailedHeaderStopsCallback(t *testing.T) {
-	m, q, _ := setup(t)
+	m, q := setup(t)
 	ctx := context.Background()
 
 	wfID, err := m.CreateChord(ctx, []TaskSpec{
@@ -270,7 +270,7 @@ func TestChordFailedHeaderStopsCallback(t *testing.T) {
 
 // An empty task list is rejected for all workflow types.
 func TestEmptyTasksRejected(t *testing.T) {
-	m, _, _ := setup(t)
+	m, _ := setup(t)
 	ctx := context.Background()
 
 	_, err := m.CreateChain(ctx, nil, "default")

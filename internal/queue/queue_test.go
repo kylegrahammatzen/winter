@@ -22,12 +22,12 @@ func setup(t *testing.T) (*Queue, *miniredis.Miniredis) {
 	return New(rdb), mr
 }
 
-func makeJob(id, kind, queue string, priority int) *JobRecord {
+func makeJob(id, kind string, priority int) *JobRecord {
 	payload, _ := json.Marshal(map[string]string{"test": "data"})
 	return &JobRecord{
 		ID:         id,
 		Kind:       kind,
-		Queue:      queue,
+		Queue:      "default",
 		Priority:   priority,
 		State:      "pending",
 		Payload:    payload,
@@ -41,7 +41,7 @@ func TestEnqueueAndDequeue(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
 
-	job := makeJob("job-1", "test.task", "default", 5)
+	job := makeJob("job-1", "test.task", 5)
 	err := q.Enqueue(ctx, job, "", 0)
 	require.NoError(t, err)
 
@@ -72,9 +72,9 @@ func TestPriorityOrdering(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
 
-	require.NoError(t, q.Enqueue(ctx, makeJob("high", "test", "default", 10), "", 0))
-	require.NoError(t, q.Enqueue(ctx, makeJob("low", "test", "default", 0), "", 0))
-	require.NoError(t, q.Enqueue(ctx, makeJob("mid", "test", "default", 5), "", 0))
+	require.NoError(t, q.Enqueue(ctx, makeJob("high", "test", 10), "", 0))
+	require.NoError(t, q.Enqueue(ctx, makeJob("low", "test", 0), "", 0))
+	require.NoError(t, q.Enqueue(ctx, makeJob("mid", "test", 5), "", 0))
 
 	first, err := q.Dequeue(ctx, "default", "w1")
 	require.NoError(t, err)
@@ -97,7 +97,7 @@ func TestAck(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
 
-	require.NoError(t, q.Enqueue(ctx, makeJob("job-1", "test", "default", 5), "", 0))
+	require.NoError(t, q.Enqueue(ctx, makeJob("job-1", "test", 5), "", 0))
 	rec, err := q.Dequeue(ctx, "default", "worker-1")
 	require.NoError(t, err)
 	require.NotNil(t, rec)
@@ -116,7 +116,7 @@ func TestNackWithRetry(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
 
-	require.NoError(t, q.Enqueue(ctx, makeJob("job-1", "test", "default", 5), "", 0))
+	require.NoError(t, q.Enqueue(ctx, makeJob("job-1", "test", 5), "", 0))
 	_, err := q.Dequeue(ctx, "default", "worker-1")
 	require.NoError(t, err)
 
@@ -136,7 +136,7 @@ func TestNackExhaustedRetries(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
 
-	job := makeJob("job-1", "test", "default", 5)
+	job := makeJob("job-1", "test", 5)
 	job.MaxRetries = 1
 	require.NoError(t, q.Enqueue(ctx, job, "", 0))
 
@@ -157,7 +157,7 @@ func TestNackSkipRetry(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
 
-	require.NoError(t, q.Enqueue(ctx, makeJob("job-1", "test", "default", 5), "", 0))
+	require.NoError(t, q.Enqueue(ctx, makeJob("job-1", "test", 5), "", 0))
 	_, err := q.Dequeue(ctx, "default", "worker-1")
 	require.NoError(t, err)
 
@@ -171,7 +171,7 @@ func TestReschedule(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
 
-	require.NoError(t, q.Enqueue(ctx, makeJob("job-1", "test", "default", 5), "", 0))
+	require.NoError(t, q.Enqueue(ctx, makeJob("job-1", "test", 5), "", 0))
 	_, err := q.Dequeue(ctx, "default", "worker-1")
 	require.NoError(t, err)
 
@@ -190,7 +190,7 @@ func TestCancel(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
 
-	require.NoError(t, q.Enqueue(ctx, makeJob("job-1", "test", "default", 5), "", 0))
+	require.NoError(t, q.Enqueue(ctx, makeJob("job-1", "test", 5), "", 0))
 	_, err := q.Dequeue(ctx, "default", "worker-1")
 	require.NoError(t, err)
 
@@ -208,7 +208,7 @@ func TestDelayedEnqueueAndPromote(t *testing.T) {
 	q, mr := setup(t)
 	ctx := context.Background()
 
-	job := makeJob("delayed-1", "test", "default", 5)
+	job := makeJob("delayed-1", "test", 5)
 	job.ScheduledAt = time.Now().Add(-1 * time.Second).UnixMilli()
 	require.NoError(t, q.Enqueue(ctx, job, "", 0))
 
@@ -233,7 +233,7 @@ func TestPauseResume(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
 
-	require.NoError(t, q.Enqueue(ctx, makeJob("job-1", "test", "default", 5), "", 0))
+	require.NoError(t, q.Enqueue(ctx, makeJob("job-1", "test", 5), "", 0))
 
 	require.NoError(t, q.Pause(ctx, "default"))
 
@@ -254,10 +254,10 @@ func TestUniqueJob(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
 
-	err := q.Enqueue(ctx, makeJob("job-1", "test", "default", 5), "test:abc123", 60*time.Second)
+	err := q.Enqueue(ctx, makeJob("job-1", "test", 5), "test:abc123", 60*time.Second)
 	require.NoError(t, err)
 
-	err = q.Enqueue(ctx, makeJob("job-2", "test", "default", 5), "test:abc123", 60*time.Second)
+	err = q.Enqueue(ctx, makeJob("job-2", "test", 5), "test:abc123", 60*time.Second)
 	require.ErrorIs(t, err, ErrDuplicate)
 }
 
@@ -268,7 +268,7 @@ func TestBatchEnqueue(t *testing.T) {
 
 	jobs := make([]*JobRecord, 1000)
 	for i := range jobs {
-		jobs[i] = makeJob(fmt.Sprintf("batch-%d", i), "batch.task", "default", 5)
+		jobs[i] = makeJob(fmt.Sprintf("batch-%d", i), "batch.task", 5)
 	}
 
 	err := q.EnqueueMany(ctx, jobs)
@@ -285,11 +285,11 @@ func TestUniqueKeyCleanupOnAck(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
 
-	err := q.Enqueue(ctx, makeJob("job-1", "test", "default", 5), "test:uniq1", 60*time.Second)
+	err := q.Enqueue(ctx, makeJob("job-1", "test", 5), "test:uniq1", 60*time.Second)
 	require.NoError(t, err)
 
 	// Same unique key should be rejected.
-	err = q.Enqueue(ctx, makeJob("job-2", "test", "default", 5), "test:uniq1", 60*time.Second)
+	err = q.Enqueue(ctx, makeJob("job-2", "test", 5), "test:uniq1", 60*time.Second)
 	require.ErrorIs(t, err, ErrDuplicate)
 
 	rec, err := q.Dequeue(ctx, "default", "worker-1")
@@ -300,7 +300,7 @@ func TestUniqueKeyCleanupOnAck(t *testing.T) {
 	require.NoError(t, err)
 
 	// After ack, the unique key should be freed.
-	err = q.Enqueue(ctx, makeJob("job-3", "test", "default", 5), "test:uniq1", 60*time.Second)
+	err = q.Enqueue(ctx, makeJob("job-3", "test", 5), "test:uniq1", 60*time.Second)
 	require.NoError(t, err)
 }
 
@@ -309,7 +309,7 @@ func TestUniqueKeyCleanupOnDead(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
 
-	job := makeJob("job-1", "test", "default", 5)
+	job := makeJob("job-1", "test", 5)
 	job.MaxRetries = 1
 	err := q.Enqueue(ctx, job, "test:uniq2", 60*time.Second)
 	require.NoError(t, err)
@@ -322,7 +322,7 @@ func TestUniqueKeyCleanupOnDead(t *testing.T) {
 	assert.Equal(t, "dead", result)
 
 	// After dead, the unique key should be freed.
-	err = q.Enqueue(ctx, makeJob("job-2", "test", "default", 5), "test:uniq2", 60*time.Second)
+	err = q.Enqueue(ctx, makeJob("job-2", "test", 5), "test:uniq2", 60*time.Second)
 	require.NoError(t, err)
 }
 
@@ -331,7 +331,7 @@ func TestUniqueKeyPreservedOnRetry(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
 
-	job := makeJob("job-1", "test", "default", 5)
+	job := makeJob("job-1", "test", 5)
 	job.MaxRetries = 5
 	err := q.Enqueue(ctx, job, "test:uniq3", 60*time.Second)
 	require.NoError(t, err)
@@ -344,7 +344,7 @@ func TestUniqueKeyPreservedOnRetry(t *testing.T) {
 	assert.Equal(t, "retry", result)
 
 	// Unique key should still be held since the job is retrying.
-	err = q.Enqueue(ctx, makeJob("job-2", "test", "default", 5), "test:uniq3", 60*time.Second)
+	err = q.Enqueue(ctx, makeJob("job-2", "test", 5), "test:uniq3", 60*time.Second)
 	require.ErrorIs(t, err, ErrDuplicate)
 }
 
@@ -354,7 +354,7 @@ func TestListDead(t *testing.T) {
 	ctx := context.Background()
 
 	for i := range 5 {
-		job := makeJob(fmt.Sprintf("dead-%d", i), "test", "default", 5)
+		job := makeJob(fmt.Sprintf("dead-%d", i), "test", 5)
 		job.MaxRetries = 1
 		err := q.Enqueue(ctx, job, "", 0)
 		require.NoError(t, err)
@@ -391,7 +391,7 @@ func TestPeekDead(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, rec)
 
-	job := makeJob("job-1", "test", "default", 5)
+	job := makeJob("job-1", "test", 5)
 	job.MaxRetries = 1
 	err = q.Enqueue(ctx, job, "", 0)
 	require.NoError(t, err)
@@ -414,7 +414,7 @@ func TestRetryDead(t *testing.T) {
 	q, _ := setup(t)
 	ctx := context.Background()
 
-	job := makeJob("job-1", "test", "default", 5)
+	job := makeJob("job-1", "test", 5)
 	job.MaxRetries = 1
 	err := q.Enqueue(ctx, job, "", 0)
 	require.NoError(t, err)
@@ -460,7 +460,7 @@ func TestPurgeDead(t *testing.T) {
 	ctx := context.Background()
 
 	for i := range 3 {
-		job := makeJob(fmt.Sprintf("dead-%d", i), "test", "default", 5)
+		job := makeJob(fmt.Sprintf("dead-%d", i), "test", 5)
 		job.MaxRetries = 1
 		err := q.Enqueue(ctx, job, "", 0)
 		require.NoError(t, err)
@@ -500,7 +500,6 @@ func TestConcurrentEnqueueDequeue(t *testing.T) {
 			job := makeJob(
 				fmt.Sprintf("job-%d", i),
 				"test",
-				"default",
 				i%10,
 			)
 			_ = q.Enqueue(ctx, job, "", 0)

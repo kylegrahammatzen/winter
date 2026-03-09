@@ -28,7 +28,7 @@ func TestAllowUnderLimit(t *testing.T) {
 		res, err := lim.Allow(ctx, "task.a", 5, time.Second)
 		require.NoError(t, err)
 		assert.True(t, res.Allowed)
-		assert.Equal(t, int64(4-int64(i)), res.Remaining)
+		assert.Equal(t, int64(4-i), res.Remaining)
 	}
 }
 

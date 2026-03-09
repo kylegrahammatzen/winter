@@ -10,21 +10,21 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-func benchSetup(b *testing.B) (*Queue, *miniredis.Miniredis) {
+func benchSetup(b *testing.B) *Queue {
 	b.Helper()
 	mr := miniredis.RunT(b)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	b.Cleanup(func() { rdb.Close() })
-	return New(rdb), mr
+	return New(rdb)
 }
 
-func benchJob(id string, priority int) *JobRecord {
+func benchJob(id string) *JobRecord {
 	payload, _ := json.Marshal(map[string]string{"order_id": "abc-123", "amount": "4999"})
 	return &JobRecord{
 		ID:         id,
 		Kind:       "order.process",
 		Queue:      "default",
-		Priority:   priority,
+		Priority:   5,
 		State:      "pending",
 		Payload:    payload,
 		MaxRetries: 3,
@@ -33,36 +33,36 @@ func benchJob(id string, priority int) *JobRecord {
 }
 
 func BenchmarkEnqueue(b *testing.B) {
-	q, _ := benchSetup(b)
+	q := benchSetup(b)
 	ctx := context.Background()
 
 	for i := range b.N {
 		id := fmt.Sprintf("job-%d", i)
-		_ = q.Enqueue(ctx, benchJob(id, 5), "", 0)
+		_ = q.Enqueue(ctx, benchJob(id), "", 0)
 	}
 }
 
 func BenchmarkEnqueueParallel(b *testing.B) {
-	q, _ := benchSetup(b)
+	q := benchSetup(b)
 	ctx := context.Background()
 
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
 			id := fmt.Sprintf("job-p-%d", i)
-			_ = q.Enqueue(ctx, benchJob(id, 5), "", 0)
+			_ = q.Enqueue(ctx, benchJob(id), "", 0)
 			i++
 		}
 	})
 }
 
 func BenchmarkDequeue(b *testing.B) {
-	q, _ := benchSetup(b)
+	q := benchSetup(b)
 	ctx := context.Background()
 
 	for i := range b.N {
 		id := fmt.Sprintf("job-%d", i)
-		_ = q.Enqueue(ctx, benchJob(id, 5), "", 0)
+		_ = q.Enqueue(ctx, benchJob(id), "", 0)
 	}
 
 	b.ResetTimer()
@@ -72,12 +72,12 @@ func BenchmarkDequeue(b *testing.B) {
 }
 
 func BenchmarkAck(b *testing.B) {
-	q, _ := benchSetup(b)
+	q := benchSetup(b)
 	ctx := context.Background()
 
 	for i := range b.N {
 		id := fmt.Sprintf("job-%d", i)
-		_ = q.Enqueue(ctx, benchJob(id, 5), "", 0)
+		_ = q.Enqueue(ctx, benchJob(id), "", 0)
 	}
 
 	ids := make([]string, b.N)
@@ -97,12 +97,12 @@ func BenchmarkAck(b *testing.B) {
 }
 
 func BenchmarkEndToEnd(b *testing.B) {
-	q, _ := benchSetup(b)
+	q := benchSetup(b)
 	ctx := context.Background()
 
 	for i := range b.N {
 		id := fmt.Sprintf("job-%d", i)
-		_ = q.Enqueue(ctx, benchJob(id, 5), "", 0)
+		_ = q.Enqueue(ctx, benchJob(id), "", 0)
 
 		rec, _ := q.Dequeue(ctx, "default", "worker-bench")
 		if rec != nil {
@@ -113,12 +113,12 @@ func BenchmarkEndToEnd(b *testing.B) {
 
 // BenchmarkBatchEnqueue1000 measures pipelined insertion of 1000 jobs per iteration.
 func BenchmarkBatchEnqueue1000(b *testing.B) {
-	q, _ := benchSetup(b)
+	q := benchSetup(b)
 	ctx := context.Background()
 
 	jobs := make([]*JobRecord, 1000)
 	for i := range jobs {
-		jobs[i] = benchJob(fmt.Sprintf("batch-%d", i), 5)
+		jobs[i] = benchJob(fmt.Sprintf("batch-%d", i))
 	}
 
 	b.ResetTimer()
@@ -131,14 +131,14 @@ func BenchmarkBatchEnqueue1000(b *testing.B) {
 }
 
 func BenchmarkEndToEndParallel(b *testing.B) {
-	q, _ := benchSetup(b)
+	q := benchSetup(b)
 	ctx := context.Background()
 
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
 			id := fmt.Sprintf("job-e2e-%d", i)
-			_ = q.Enqueue(ctx, benchJob(id, 5), "", 0)
+			_ = q.Enqueue(ctx, benchJob(id), "", 0)
 
 			rec, _ := q.Dequeue(ctx, "default", "worker-bench")
 			if rec != nil {

@@ -20,7 +20,7 @@ type hookTask struct {
 
 func (hookTask) Kind() string { return "hook.test" }
 
-func setupHookServer(t *testing.T) (*Server, *Client, *miniredis.Miniredis) {
+func setupHookServer(t *testing.T) (*Server, *Client) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
@@ -32,12 +32,12 @@ func setupHookServer(t *testing.T) (*Server, *Client, *miniredis.Miniredis) {
 		PollInterval: 10 * time.Millisecond,
 	})
 
-	return server, client, mr
+	return server, client
 }
 
 // TestOnStartHook verifies the OnStart hook fires before the handler runs.
 func TestOnStartHook(t *testing.T) {
-	server, client, _ := setupHookServer(t)
+	server, client := setupHookServer(t)
 
 	var started atomic.Int32
 	server.OnStart(func(_ context.Context, ev JobEvent) {
@@ -54,7 +54,7 @@ func TestOnStartHook(t *testing.T) {
 	_, err := Enqueue(client, ctx, hookTask{Value: "a"})
 	require.NoError(t, err)
 
-	go server.Start()
+	go func() { _ = server.Start() }()
 	t.Cleanup(func() { cancel(); server.Stop() })
 
 	require.Eventually(t, func() bool { return started.Load() == 1 }, 2*time.Second, 20*time.Millisecond)
@@ -62,7 +62,7 @@ func TestOnStartHook(t *testing.T) {
 
 // TestOnCompleteHook verifies the OnComplete hook fires after successful processing.
 func TestOnCompleteHook(t *testing.T) {
-	server, client, _ := setupHookServer(t)
+	server, client := setupHookServer(t)
 
 	var completed atomic.Int32
 	server.OnComplete(func(_ context.Context, ev JobEvent) {
@@ -78,7 +78,7 @@ func TestOnCompleteHook(t *testing.T) {
 	_, err := Enqueue(client, ctx, hookTask{Value: "b"})
 	require.NoError(t, err)
 
-	go server.Start()
+	go func() { _ = server.Start() }()
 	t.Cleanup(func() { cancel(); server.Stop() })
 
 	require.Eventually(t, func() bool { return completed.Load() == 1 }, 2*time.Second, 20*time.Millisecond)
@@ -86,7 +86,7 @@ func TestOnCompleteHook(t *testing.T) {
 
 // TestOnErrorHook verifies the OnError hook fires when a job fails but will be retried.
 func TestOnErrorHook(t *testing.T) {
-	server, client, _ := setupHookServer(t)
+	server, client := setupHookServer(t)
 
 	var errored atomic.Int32
 	var mu sync.Mutex
@@ -107,7 +107,7 @@ func TestOnErrorHook(t *testing.T) {
 	_, err := Enqueue(client, ctx, hookTask{Value: "c"})
 	require.NoError(t, err)
 
-	go server.Start()
+	go func() { _ = server.Start() }()
 	t.Cleanup(func() { cancel(); server.Stop() })
 
 	require.Eventually(t, func() bool { return errored.Load() >= 1 }, 2*time.Second, 20*time.Millisecond)
@@ -119,7 +119,7 @@ func TestOnErrorHook(t *testing.T) {
 
 // TestOnDeadHook verifies the OnDead hook fires when a job exhausts retries.
 func TestOnDeadHook(t *testing.T) {
-	server, client, _ := setupHookServer(t)
+	server, client := setupHookServer(t)
 
 	var dead atomic.Int32
 	server.OnDead(func(_ context.Context, ev JobEvent) {
@@ -135,7 +135,7 @@ func TestOnDeadHook(t *testing.T) {
 	_, err := Enqueue(client, ctx, hookTask{Value: "d"})
 	require.NoError(t, err)
 
-	go server.Start()
+	go func() { _ = server.Start() }()
 	t.Cleanup(func() { cancel(); server.Stop() })
 
 	require.Eventually(t, func() bool { return dead.Load() == 1 }, 2*time.Second, 20*time.Millisecond)
@@ -143,7 +143,7 @@ func TestOnDeadHook(t *testing.T) {
 
 // TestMultipleHooksSameEvent verifies multiple hooks on the same event all fire.
 func TestMultipleHooksSameEvent(t *testing.T) {
-	server, client, _ := setupHookServer(t)
+	server, client := setupHookServer(t)
 
 	var count atomic.Int32
 	server.OnComplete(func(_ context.Context, _ JobEvent) { count.Add(1) })
@@ -157,7 +157,7 @@ func TestMultipleHooksSameEvent(t *testing.T) {
 	_, err := Enqueue(client, ctx, hookTask{Value: "e"})
 	require.NoError(t, err)
 
-	go server.Start()
+	go func() { _ = server.Start() }()
 	t.Cleanup(func() { cancel(); server.Stop() })
 
 	require.Eventually(t, func() bool { return count.Load() == 2 }, 2*time.Second, 20*time.Millisecond)

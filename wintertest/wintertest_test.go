@@ -17,7 +17,10 @@ func TestRequireEnqueued(t *testing.T) {
 	client := NewClient(t)
 	ctx := context.Background()
 
-	winter.Enqueue(client, ctx, testTask{UserID: 42})
+	_, err := winter.Enqueue(client, ctx, testTask{UserID: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	RequireEnqueued(t, client, testTask{UserID: 42})
 }
@@ -26,9 +29,12 @@ func TestRequireEnqueuedN(t *testing.T) {
 	client := NewClient(t)
 	ctx := context.Background()
 
-	winter.Enqueue(client, ctx, testTask{UserID: 1})
-	winter.Enqueue(client, ctx, testTask{UserID: 2})
-	winter.Enqueue(client, ctx, testTask{UserID: 3})
+	for _, uid := range []int{1, 2, 3} {
+		_, err := winter.Enqueue(client, ctx, testTask{UserID: uid})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	RequireEnqueuedN(t, client, "test.task", 3)
 }

@@ -11,12 +11,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setupQueue(t *testing.T) (*queue.Queue, *miniredis.Miniredis) {
+func setupQueue(t *testing.T) *queue.Queue {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { rdb.Close() })
-	return queue.New(rdb), mr
+	return queue.New(rdb)
 }
 
 func enqueueTestJob(t *testing.T, q *queue.Queue, id string) {
@@ -38,7 +38,7 @@ func enqueueTestJob(t *testing.T, q *queue.Queue, id string) {
 // Dequeues 3 jobs, acks one, and verifies the 2 with expired leases are
 // recovered back to the ready set.
 func TestRecoverExpiredLeases(t *testing.T) {
-	q, _ := setupQueue(t)
+	q := setupQueue(t)
 	ctx := context.Background()
 
 	enqueueTestJob(t, q, "job-1")
@@ -81,7 +81,7 @@ func TestRecoverExpiredLeases(t *testing.T) {
 
 // Extends a lease to 60s and verifies the job is not recovered at 35s but is at 65s.
 func TestLeaseExtensionPreventsRecovery(t *testing.T) {
-	q, _ := setupQueue(t)
+	q := setupQueue(t)
 	ctx := context.Background()
 
 	enqueueTestJob(t, q, "job-1")
@@ -108,7 +108,7 @@ func TestLeaseExtensionPreventsRecovery(t *testing.T) {
 // Runs recovery twice at the same future time and verifies the job is only
 // recovered once thanks to the SREM guard in the Lua script.
 func TestRecoveryIdempotent(t *testing.T) {
-	q, _ := setupQueue(t)
+	q := setupQueue(t)
 	ctx := context.Background()
 
 	enqueueTestJob(t, q, "job-1")
@@ -130,7 +130,7 @@ func TestRecoveryIdempotent(t *testing.T) {
 
 // Verifies that a recovered job's state is reset to pending in the hash.
 func TestRecoveredJobStateIsPending(t *testing.T) {
-	q, _ := setupQueue(t)
+	q := setupQueue(t)
 	ctx := context.Background()
 
 	enqueueTestJob(t, q, "job-1")
@@ -151,7 +151,7 @@ func TestRecoveredJobStateIsPending(t *testing.T) {
 
 // Verifies that acking a job removes its lease entry so it cannot be recovered.
 func TestAckCleansLease(t *testing.T) {
-	q, _ := setupQueue(t)
+	q := setupQueue(t)
 	ctx := context.Background()
 
 	enqueueTestJob(t, q, "job-1")
@@ -171,7 +171,7 @@ func TestAckCleansLease(t *testing.T) {
 
 // Verifies that nacking a job removes its lease entry so it cannot be recovered.
 func TestNackCleansLease(t *testing.T) {
-	q, _ := setupQueue(t)
+	q := setupQueue(t)
 	ctx := context.Background()
 
 	enqueueTestJob(t, q, "job-1")
@@ -191,7 +191,7 @@ func TestNackCleansLease(t *testing.T) {
 
 // Verifies that rescheduling a job removes its lease entry.
 func TestRescheduleCleansLease(t *testing.T) {
-	q, _ := setupQueue(t)
+	q := setupQueue(t)
 	ctx := context.Background()
 
 	enqueueTestJob(t, q, "job-1")
@@ -211,7 +211,7 @@ func TestRescheduleCleansLease(t *testing.T) {
 
 // Verifies that cancelling a job removes its lease entry.
 func TestCancelCleansLease(t *testing.T) {
-	q, _ := setupQueue(t)
+	q := setupQueue(t)
 	ctx := context.Background()
 
 	enqueueTestJob(t, q, "job-1")
@@ -231,7 +231,7 @@ func TestCancelCleansLease(t *testing.T) {
 
 // Verifies that consecutive heartbeats succeed without error.
 func TestHeartbeat(t *testing.T) {
-	q, _ := setupQueue(t)
+	q := setupQueue(t)
 	ctx := context.Background()
 
 	err := q.Heartbeat(ctx, "worker-1")
@@ -243,7 +243,7 @@ func TestHeartbeat(t *testing.T) {
 
 // Verifies that QueueStats accurately reflects ready, active, and completed counts.
 func TestQueueStats(t *testing.T) {
-	q, _ := setupQueue(t)
+	q := setupQueue(t)
 	ctx := context.Background()
 
 	enqueueTestJob(t, q, "job-1")

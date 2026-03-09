@@ -13,17 +13,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setup(t *testing.T) (*queue.Queue, redis.UniversalClient, *miniredis.Miniredis) {
+func setup(t *testing.T) (*queue.Queue, redis.UniversalClient) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { rdb.Close() })
-	return queue.New(rdb), rdb, mr
+	return queue.New(rdb), rdb
 }
 
 // Parses a valid cron expression and rejects an invalid one.
 func TestNewCronValidation(t *testing.T) {
-	q, rdb, _ := setup(t)
+	q, rdb := setup(t)
 
 	_, err := NewCron(q, rdb, []Entry{
 		{Name: "good", Schedule: "* * * * *", Kind: "test.job"},
@@ -39,7 +39,7 @@ func TestNewCronValidation(t *testing.T) {
 
 // Seeds initial state for entries that have no Redis state yet.
 func TestCronSeedsNextRun(t *testing.T) {
-	q, rdb, _ := setup(t)
+	q, rdb := setup(t)
 	ctx := context.Background()
 
 	cron, err := NewCron(q, rdb, []Entry{
@@ -59,7 +59,7 @@ func TestCronSeedsNextRun(t *testing.T) {
 
 // Fires a cron entry whose next-run is in the past and verifies a job is enqueued.
 func TestCronTickEnqueuesJob(t *testing.T) {
-	q, rdb, _ := setup(t)
+	q, rdb := setup(t)
 	ctx := context.Background()
 
 	cron, err := NewCron(q, rdb, []Entry{
@@ -82,7 +82,7 @@ func TestCronTickEnqueuesJob(t *testing.T) {
 
 // Verifies that a future next-run time does not trigger an enqueue.
 func TestCronTickSkipsFuture(t *testing.T) {
-	q, rdb, _ := setup(t)
+	q, rdb := setup(t)
 	ctx := context.Background()
 
 	cron, err := NewCron(q, rdb, []Entry{
@@ -103,7 +103,7 @@ func TestCronTickSkipsFuture(t *testing.T) {
 
 // Two concurrent ticks on the same entry only enqueue one job thanks to CAS.
 func TestCronTickIdempotent(t *testing.T) {
-	q, rdb, _ := setup(t)
+	q, rdb := setup(t)
 	ctx := context.Background()
 
 	cron1, err := NewCron(q, rdb, []Entry{
@@ -130,7 +130,7 @@ func TestCronTickIdempotent(t *testing.T) {
 
 // After a tick fires, the next-run state advances to a future timestamp.
 func TestCronTickAdvancesNextRun(t *testing.T) {
-	q, rdb, _ := setup(t)
+	q, rdb := setup(t)
 	ctx := context.Background()
 
 	cron, err := NewCron(q, rdb, []Entry{
@@ -154,7 +154,7 @@ func TestCronTickAdvancesNextRun(t *testing.T) {
 
 // Uses a custom queue name from the entry config.
 func TestCronCustomQueue(t *testing.T) {
-	q, rdb, _ := setup(t)
+	q, rdb := setup(t)
 	ctx := context.Background()
 
 	cron, err := NewCron(q, rdb, []Entry{
