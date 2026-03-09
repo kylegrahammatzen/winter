@@ -4,23 +4,45 @@ package winter.v1;
 
 option go_package = "github.com/kylegrahammatzen/winter/proto/winter/v1;winterv1";
 
+// QueueService exposes the core Winter queue operations over gRPC, allowing
+// language-agnostic workers to enqueue, dequeue, and manage jobs.
 service QueueService {
+  // Enqueue inserts a new job into the specified queue.
   rpc Enqueue(EnqueueRequest) returns (EnqueueResponse);
+
+  // Dequeue long-polls for a ready job, returning it to the calling worker.
   rpc Dequeue(DequeueRequest) returns (DequeueResponse);
+
+  // Ack marks a job as successfully completed.
   rpc Ack(AckRequest) returns (AckResponse);
+
+  // Nack records a job failure and either schedules a retry or sends it to dead.
   rpc Nack(NackRequest) returns (NackResponse);
+
+  // Heartbeat updates the worker's last-seen timestamp for liveness detection.
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // GetJob fetches the full details of a job by ID.
   rpc GetJob(GetJobRequest) returns (GetJobResponse);
+
+  // QueueStats returns a snapshot of queue depths and cumulative counters.
   rpc QueueStats(QueueStatsRequest) returns (QueueStatsResponse);
 }
 
 message EnqueueRequest {
+  // Task kind identifier used to route the job to the correct handler.
   string kind = 1;
+  // Serialized task payload.
   bytes payload = 2;
+  // Destination queue name. Defaults to "default" if empty.
   string queue = 3;
+  // Lower values are dequeued first.
   int32 priority = 4;
+  // Unix millisecond timestamp for delayed scheduling. Zero means immediate.
   int64 scheduled_at = 5;
+  // Maximum retry attempts before the job goes to dead.
   int32 max_retries = 6;
+  // Deduplication window in milliseconds. Zero disables uniqueness.
   int64 unique_period_ms = 7;
 }
 
@@ -30,11 +52,14 @@ message EnqueueResponse {
 
 message DequeueRequest {
   string queue = 1;
+  // Identifies the worker claiming the job.
   string worker_id = 2;
+  // How long the server should poll before returning an empty response.
   int64 timeout_ms = 3;
 }
 
 message DequeueResponse {
+  // Nil when no job was available within the timeout.
   Job job = 1;
 }
 
@@ -50,16 +75,20 @@ message NackRequest {
   string job_id = 1;
   string queue = 2;
   string worker_id = 3;
+  // Human-readable error message stored on the job.
   string error = 4;
+  // When true the job goes directly to dead without retrying.
   bool skip_retry = 5;
 }
 
 message NackResponse {
+  // Either "retry" or "dead".
   string outcome = 1;
 }
 
 message HeartbeatRequest {
   string worker_id = 1;
+  // Queues this worker is polling, used for observability.
   repeated string queues = 2;
 }
 
@@ -87,15 +116,18 @@ message QueueStatsResponse {
   int64 failed = 7;
 }
 
+// Job represents a queued task with all its metadata.
 message Job {
   string id = 1;
   string kind = 2;
   bytes payload = 3;
   string queue = 4;
   int32 priority = 5;
+  // One of: pending, active, completed, retry, dead, cancelled.
   string state = 6;
   int32 attempt = 7;
   int32 max_retries = 8;
+  // All timestamps are Unix milliseconds.
   int64 created_at = 9;
   int64 scheduled_at = 10;
   int64 started_at = 11;
