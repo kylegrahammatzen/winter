@@ -14,7 +14,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/kylegrahammatzen/winter/internal/queue"
+	"github.com/kylegrahammatzen/winter/internal/scheduler"
 	"github.com/kylegrahammatzen/winter/internal/worker"
+	"github.com/kylegrahammatzen/winter/internal/workflow"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -35,10 +37,20 @@ func Queues(args ...interface{}) []QueueWeight {
 	return queues
 }
 
+// CronEntry defines a periodic job to be scheduled by the server.
+type CronEntry struct {
+	Name     string
+	Schedule string
+	Queue    string
+	Kind     string
+	Payload  []byte
+}
+
 // ServerConfig controls concurrency, queue weights, poll interval, and logging.
 type ServerConfig struct {
 	Concurrency     int
 	Queues          []QueueWeight
+	Cron            []CronEntry
 	PollInterval    time.Duration
 	ShutdownTimeout time.Duration
 	Logger          *slog.Logger
@@ -198,6 +210,31 @@ func (s *Server) Start() error {
 		defer s.wg.Done()
 		recovery.Run(ctx)
 	}()
+
+	if len(s.cfg.Cron) > 0 {
+		entries := make([]scheduler.Entry, len(s.cfg.Cron))
+		for i, ce := range s.cfg.Cron {
+			entries[i] = scheduler.Entry{
+				Name:     ce.Name,
+				Schedule: ce.Schedule,
+				Queue:    ce.Queue,
+				Kind:     ce.Kind,
+				Payload:  ce.Payload,
+			}
+		}
+		cronSched, err := scheduler.NewCron(s.client.queue, s.client.rdb, entries, scheduler.CronConfig{
+			Logger: s.logger,
+		})
+		if err != nil {
+			cancel()
+			return fmt.Errorf("winter: cron setup: %w", err)
+		}
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			cronSched.Run(ctx)
+		}()
+	}
 
 	select {
 	case <-sig:
@@ -391,6 +428,12 @@ func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 			s.logger.Error("winter: job processed", event...)
 			return
 		}
+		if rec.WorkflowID != "" {
+			mgr := workflow.NewManager(s.client.queue, s.client.rdb)
+			if wfErr := mgr.OnJobCompleted(ctx, rec.WorkflowID, rec.ID); wfErr != nil {
+				s.logger.Error("winter: workflow advance error", "workflow_id", rec.WorkflowID, "error", wfErr)
+			}
+		}
 		event = append(event, "outcome", "completed")
 		s.logger.Info("winter: job processed", event...)
 		return
@@ -435,6 +478,12 @@ func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 
 	event = append(event, "outcome", result, "backoff_ms", backoffMs)
 	if result == "dead" {
+		if rec.WorkflowID != "" {
+			mgr := workflow.NewManager(s.client.queue, s.client.rdb)
+			if wfErr := mgr.OnJobFailed(ctx, rec.WorkflowID, rec.ID); wfErr != nil {
+				s.logger.Error("winter: workflow failure error", "workflow_id", rec.WorkflowID, "error", wfErr)
+			}
+		}
 		s.logger.Warn("winter: job processed", event...)
 	} else {
 		s.logger.Info("winter: job processed", event...)
