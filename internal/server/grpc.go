@@ -3,7 +3,9 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"time"
@@ -65,7 +67,8 @@ func (s *GRPCServer) Enqueue(ctx context.Context, req *pb.EnqueueRequest) (*pb.E
 	var uniquePeriod time.Duration
 	if req.UniquePeriodMs > 0 {
 		uniquePeriod = time.Duration(req.UniquePeriodMs) * time.Millisecond
-		uniqueKey = req.Kind + ":" + string(req.Payload)
+		hash := sha256.Sum256(req.Payload)
+		uniqueKey = fmt.Sprintf("%s:%x", req.Kind, hash)
 	}
 
 	if err := s.q.Enqueue(ctx, job, uniqueKey, uniquePeriod); err != nil {
@@ -195,7 +198,7 @@ func (s *GRPCServer) QueueStats(ctx context.Context, req *pb.QueueStatsRequest) 
 		Delayed:   stats["delayed"],
 		Dead:      stats["dead"],
 		Completed: stats["completed"],
-		Failed:    stats["dead"],
+		Failed:    stats["failed"],
 	}, nil
 }
 
