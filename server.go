@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/kylegrahammatzen/winter/internal/queue"
+	"github.com/kylegrahammatzen/winter/internal/ratelimit"
 	"github.com/kylegrahammatzen/winter/internal/scheduler"
 	"github.com/kylegrahammatzen/winter/internal/worker"
 	"github.com/kylegrahammatzen/winter/internal/workflow"
@@ -27,7 +28,7 @@ type QueueWeight struct {
 }
 
 // Queues builds a weighted queue list from alternating name/weight pairs.
-func Queues(args ...interface{}) []QueueWeight {
+func Queues(args ...any) []QueueWeight {
 	var queues []QueueWeight
 	for i := 0; i < len(args)-1; i += 2 {
 		name, _ := args[i].(string)
@@ -56,11 +57,6 @@ type ServerConfig struct {
 	Logger          *slog.Logger
 }
 
-type handlerEntry struct {
-	kind    string
-	handler HandlerFn
-}
-
 // Server polls queues, dispatches jobs to registered handlers, and manages
 // the worker lifecycle including graceful shutdown.
 type Server struct {
@@ -68,10 +64,20 @@ type Server struct {
 	cfg        ServerConfig
 	workerID   string
 	handlers   map[string]HandlerFn
+	rateLimits map[string]Rate
+	limiter    *ratelimit.Limiter
 	middleware []Middleware
+	hooks      serverHooks
 	logger     *slog.Logger
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
+}
+
+type serverHooks struct {
+	onStart    []HookFunc
+	onComplete []HookFunc
+	onError    []HookFunc
+	onDead     []HookFunc
 }
 
 // NewServer connects to Redis and returns a server ready to process jobs.
@@ -96,6 +102,11 @@ func newServer(client *Client, cfg ServerConfig) *Server {
 	if len(cfg.Queues) == 0 {
 		cfg.Queues = []QueueWeight{{Name: "default", Weight: 1}}
 	}
+	for i := range cfg.Queues {
+		if cfg.Queues[i].Weight < 1 {
+			cfg.Queues[i].Weight = 1
+		}
+	}
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 200 * time.Millisecond
 	}
@@ -107,18 +118,28 @@ func newServer(client *Client, cfg ServerConfig) *Server {
 	}
 
 	return &Server{
-		client:   client,
-		cfg:      cfg,
-		workerID: uuid.New().String(),
-		handlers: make(map[string]HandlerFn),
-		logger:   cfg.Logger,
+		client:     client,
+		cfg:        cfg,
+		workerID:   uuid.New().String(),
+		handlers:   make(map[string]HandlerFn),
+		rateLimits: make(map[string]Rate),
+		limiter:    ratelimit.New(client.rdb),
+		logger:     cfg.Logger,
 	}
 }
 
 // Handle registers a typed handler for its task kind on the server.
+// If the task implements TaskWithOptions and specifies a RateLimit,
+// the server enforces a per-kind token bucket before dispatching.
 func Handle[T Task](s *Server, h Handler[T]) {
 	var zero T
 	kind := zero.Kind()
+
+	if tw, ok := any(zero).(TaskWithOptions); ok {
+		if r := tw.Options().RateLimit; r.Max > 0 && r.Per > 0 {
+			s.rateLimits[kind] = r
+		}
+	}
 
 	s.handlers[kind] = func(ctx context.Context, rj *rawJob) error {
 		var args T
@@ -139,6 +160,7 @@ func Handle[T Task](s *Server, h Handler[T]) {
 			ScheduledAt: time.UnixMilli(rj.ScheduledAt),
 			StartedAt:   time.UnixMilli(rj.StartedAt),
 			LastError:   rj.LastError,
+			raw:         rj,
 		}
 
 		return h.Work(ctx, job)
@@ -148,6 +170,41 @@ func Handle[T Task](s *Server, h Handler[T]) {
 // HandleFunc registers a function as a handler for its task kind.
 func HandleFunc[T Task](s *Server, fn func(ctx context.Context, job *Job[T]) error) {
 	Handle(s, HandlerFunc[T](fn))
+}
+
+// SetRateLimit configures a rate limit for the given task kind. This overrides
+// any limit set via TaskWithOptions. Max is the number of tokens (jobs) allowed
+// per interval.
+func (s *Server) SetRateLimit(kind string, max int, per time.Duration) {
+	s.rateLimits[kind] = Rate{Max: max, Per: per}
+}
+
+// OnStart registers a hook that fires when a job is picked up for processing,
+// before the handler runs.
+func (s *Server) OnStart(fn HookFunc) {
+	s.hooks.onStart = append(s.hooks.onStart, fn)
+}
+
+// OnComplete registers a hook that fires after a job completes successfully.
+func (s *Server) OnComplete(fn HookFunc) {
+	s.hooks.onComplete = append(s.hooks.onComplete, fn)
+}
+
+// OnError registers a hook that fires when a job fails but will be retried.
+func (s *Server) OnError(fn HookFunc) {
+	s.hooks.onError = append(s.hooks.onError, fn)
+}
+
+// OnDead registers a hook that fires when a job exhausts retries and enters
+// the dead letter queue.
+func (s *Server) OnDead(fn HookFunc) {
+	s.hooks.onDead = append(s.hooks.onDead, fn)
+}
+
+func (s *Server) fireHooks(ctx context.Context, hooks []HookFunc, event JobEvent) {
+	for _, fn := range hooks {
+		fn(ctx, event)
+	}
 }
 
 // Use appends middleware to the server's handler chain.
@@ -164,6 +221,7 @@ func (s *Server) Start() error {
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sig)
 
 	s.logger.Info("winter: starting server",
 		"worker_id", s.workerID,
@@ -397,6 +455,22 @@ func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 		return
 	}
 
+	if rl, has := s.rateLimits[rec.Kind]; has {
+		res, rlErr := s.limiter.Allow(ctx, rec.Kind, rl.Max, rl.Per)
+		if rlErr != nil {
+			s.logger.Error("winter: rate limit check failed", "kind", rec.Kind, "error", rlErr)
+		} else if !res.Allowed {
+			delay := res.RetryIn
+			if delay < 50*time.Millisecond {
+				delay = 50 * time.Millisecond
+			}
+			event = append(event, "outcome", "rate_limited", "retry_in_ms", delay.Milliseconds(), "duration_ms", time.Since(start).Milliseconds())
+			s.logger.Info("winter: job processed", event...)
+			_ = s.client.queue.RescheduleJob(ctx, rec.Queue, rec.ID, s.workerID, time.Now().Add(delay))
+			return
+		}
+	}
+
 	rj := &rawJob{
 		ID:          rec.ID,
 		Kind:        rec.Kind,
@@ -411,6 +485,9 @@ func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 		StartedAt:   rec.StartedAt,
 		LastError:   rec.LastError,
 	}
+
+	je := JobEvent{ID: rec.ID, Kind: rec.Kind, Queue: rec.Queue, Attempt: rec.Attempt}
+	s.fireHooks(ctx, s.hooks.onStart, je)
 
 	fn := handler
 	for i := len(s.middleware) - 1; i >= 0; i-- {
@@ -428,17 +505,24 @@ func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 			s.logger.Error("winter: job processed", event...)
 			return
 		}
+		if len(rj.result) > 0 {
+			if resErr := s.client.queue.SetResult(ctx, rec.ID, rj.result, 7*24*time.Hour); resErr != nil {
+				s.logger.Error("winter: store result failed", "job_id", rec.ID, "error", resErr)
+			}
+		}
 		if rec.WorkflowID != "" {
 			mgr := workflow.NewManager(s.client.queue, s.client.rdb)
 			if wfErr := mgr.OnJobCompleted(ctx, rec.WorkflowID, rec.ID); wfErr != nil {
 				s.logger.Error("winter: workflow advance error", "workflow_id", rec.WorkflowID, "error", wfErr)
 			}
 		}
+		s.fireHooks(ctx, s.hooks.onComplete, je)
 		event = append(event, "outcome", "completed")
 		s.logger.Info("winter: job processed", event...)
 		return
 	}
 
+	je.Err = err
 	event = append(event, "error", err.Error())
 
 	if delay, ok := IsReschedule(err); ok {
@@ -478,6 +562,7 @@ func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 
 	event = append(event, "outcome", result, "backoff_ms", backoffMs)
 	if result == "dead" {
+		s.fireHooks(ctx, s.hooks.onDead, je)
 		if rec.WorkflowID != "" {
 			mgr := workflow.NewManager(s.client.queue, s.client.rdb)
 			if wfErr := mgr.OnJobFailed(ctx, rec.WorkflowID, rec.ID); wfErr != nil {
@@ -486,6 +571,7 @@ func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 		}
 		s.logger.Warn("winter: job processed", event...)
 	} else {
+		s.fireHooks(ctx, s.hooks.onError, je)
 		s.logger.Info("winter: job processed", event...)
 	}
 }

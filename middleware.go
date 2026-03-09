@@ -26,6 +26,7 @@ type rawJob struct {
 	ScheduledAt int64
 	StartedAt   int64
 	LastError   string
+	result      []byte
 }
 
 // Recover returns a middleware that catches panics and converts them to errors.

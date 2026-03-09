@@ -4,10 +4,13 @@ package winter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/kylegrahammatzen/winter/internal/queue"
 )
 
 // Task is the interface that all job payloads must implement.
@@ -79,6 +82,18 @@ func ValidTransition(from, to JobState) bool {
 	return false
 }
 
+// JobEvent is passed to lifecycle hooks with context about the job and any error.
+type JobEvent struct {
+	ID      string
+	Kind    string
+	Queue   string
+	Attempt int
+	Err     error
+}
+
+// HookFunc is the signature for lifecycle hook callbacks.
+type HookFunc func(ctx context.Context, event JobEvent)
+
 // Job is a type-safe wrapper around a queued job and its deserialized payload.
 type Job[T Task] struct {
 	ID          string    `json:"id"`
@@ -94,6 +109,21 @@ type Job[T Task] struct {
 	StartedAt   time.Time `json:"started_at,omitempty"`
 	CompletedAt time.Time `json:"completed_at,omitempty"`
 	LastError   string    `json:"last_error,omitempty"`
+	raw         *rawJob
+}
+
+// SetResult stores a result value to be persisted after the job completes.
+// The value is JSON-serialized and stored in Redis with a 7-day TTL.
+// Retrieve it later with inspector.JobResult or WaitForResult.
+func (j *Job[T]) SetResult(v any) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("winter: marshal result: %w", err)
+	}
+	if j.raw != nil {
+		j.raw.result = data
+	}
+	return nil
 }
 
 // Option configures how a job is enqueued.
@@ -158,7 +188,7 @@ func (f HandlerFunc[T]) Work(ctx context.Context, job *Job[T]) error {
 var ErrSkipRetry = errors.New("winter: skip retry")
 
 // ErrDuplicate is returned when enqueuing a job that matches an existing unique constraint.
-var ErrDuplicate = errors.New("winter: duplicate job")
+var ErrDuplicate = queue.ErrDuplicate
 
 type rescheduleError struct {
 	delay time.Duration
@@ -215,8 +245,14 @@ func Exponential(base time.Duration) BackoffStrategy {
 	return &exponentialBackoff{base: base}
 }
 
+const maxBackoff = 1 * time.Hour
+
 func (b *exponentialBackoff) Next(attempt int) time.Duration {
-	return b.base * time.Duration(math.Pow(2, float64(attempt)))
+	d := b.base * time.Duration(math.Pow(2, float64(attempt)))
+	if d > maxBackoff {
+		return maxBackoff
+	}
+	return d
 }
 
 type linearBackoff struct {
@@ -243,4 +279,32 @@ func Fixed(d time.Duration) BackoffStrategy {
 
 func (b *fixedBackoff) Next(_ int) time.Duration {
 	return b.d
+}
+
+// WaitForResult polls Redis until a result is available for the given job ID,
+// then deserializes it into type R. Returns context.DeadlineExceeded if the
+// context expires before a result appears. Poll interval defaults to 250ms.
+func WaitForResult[R any](c *Client, ctx context.Context, jobID string) (*R, error) {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		data, err := c.queue.GetResult(ctx, jobID)
+		if err != nil {
+			return nil, err
+		}
+		if data != nil {
+			var result R
+			if err := json.Unmarshal(data, &result); err != nil {
+				return nil, fmt.Errorf("winter: unmarshal result: %w", err)
+			}
+			return &result, nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }

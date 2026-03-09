@@ -134,6 +134,12 @@ func (i *Inspector) Resume(ctx context.Context, queueName string) error {
 	return i.client.queue.Resume(ctx, queueName)
 }
 
+// JobResult returns the stored result bytes for a completed job, or nil if
+// no result was stored.
+func (i *Inspector) JobResult(ctx context.Context, jobID string) ([]byte, error) {
+	return i.client.queue.GetResult(ctx, jobID)
+}
+
 // Close shuts down the underlying Redis connection.
 func (i *Inspector) Close() error {
 	return i.client.Close()

@@ -81,9 +81,6 @@ func Enqueue[T Task](c *Client, ctx context.Context, args T, opts ...Option) (*J
 		if taskOpts.Queue != "" {
 			o.queue = taskOpts.Queue
 		}
-		if taskOpts.MaxRetries > 0 {
-			o.priority = taskOpts.MaxRetries
-		}
 	}
 
 	for _, opt := range opts {
@@ -111,6 +108,11 @@ func Enqueue[T Task](c *Client, ctx context.Context, args T, opts ...Option) (*J
 		uniqueKey = fmt.Sprintf("%s:%x", args.Kind(), hash)
 	}
 
+	scheduledAt := int64(0)
+	if !o.scheduledAt.IsZero() {
+		scheduledAt = o.scheduledAt.UnixMilli()
+	}
+
 	job := &queue.JobRecord{
 		ID:          id,
 		Kind:        args.Kind(),
@@ -120,7 +122,7 @@ func Enqueue[T Task](c *Client, ctx context.Context, args T, opts ...Option) (*J
 		Payload:     payload,
 		MaxRetries:  maxRetries,
 		CreatedAt:   now.UnixMilli(),
-		ScheduledAt: o.scheduledAt.UnixMilli(),
+		ScheduledAt: scheduledAt,
 	}
 
 	if err := c.queue.Enqueue(ctx, job, uniqueKey, o.uniquePeriod); err != nil {
@@ -163,12 +165,21 @@ func EnqueueMany[T Task](c *Client, ctx context.Context, tasks []T, opts ...Opti
 			return nil, fmt.Errorf("winter: marshal args[%d]: %w", i, err)
 		}
 
+		queueName := o.queue
 		maxRetries := 3
 		if tw, ok := any(args).(TaskWithOptions); ok {
 			taskOpts := tw.Options()
+			if taskOpts.Queue != "" {
+				queueName = taskOpts.Queue
+			}
 			if taskOpts.MaxRetries > 0 {
 				maxRetries = taskOpts.MaxRetries
 			}
+		}
+
+		scheduledAt := int64(0)
+		if !o.scheduledAt.IsZero() {
+			scheduledAt = o.scheduledAt.UnixMilli()
 		}
 
 		id := uuid.New().String()
@@ -176,20 +187,20 @@ func EnqueueMany[T Task](c *Client, ctx context.Context, tasks []T, opts ...Opti
 		records[i] = &queue.JobRecord{
 			ID:          id,
 			Kind:        args.Kind(),
-			Queue:       o.queue,
+			Queue:       queueName,
 			Priority:    o.priority,
 			State:       string(StatePending),
 			Payload:     payload,
 			MaxRetries:  maxRetries,
 			CreatedAt:   now.UnixMilli(),
-			ScheduledAt: o.scheduledAt.UnixMilli(),
+			ScheduledAt: scheduledAt,
 		}
 
 		jobs[i] = &Job[T]{
 			ID:          id,
 			Args:        args,
 			Kind:        args.Kind(),
-			Queue:       o.queue,
+			Queue:       queueName,
 			Priority:    o.priority,
 			State:       StatePending,
 			MaxRetries:  maxRetries,
