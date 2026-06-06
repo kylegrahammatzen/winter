@@ -46,3 +46,11 @@ Enqueues five tasks with different priority values and processes them with concu
 ```
 go run ./examples/priority
 ```
+
+## graceful-shutdown
+
+Enqueues a job that runs to completion while the server is stopping. Press ctrl+c mid-run and the server drains the job, acking it on a shutdown-surviving context so a re-run does not reprocess it.
+
+```
+go run ./examples/graceful-shutdown
+```
