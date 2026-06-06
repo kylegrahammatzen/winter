@@ -502,6 +502,9 @@ func (s *Server) promoteLoop(ctx context.Context) {
 func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 	start := time.Now()
 
+	// finCtx records the job outcome even during shutdown so a finished job is not left for recovery to re-run.
+	finCtx := context.WithoutCancel(ctx)
+
 	event := []any{
 		"job_id", rec.ID,
 		"kind", rec.Kind,
@@ -516,7 +519,7 @@ func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 	if !ok {
 		event = append(event, "outcome", "dead", "duration_ms", time.Since(start).Milliseconds(), "error", "no handler registered")
 		s.logger.Error("winter: job processed", event...)
-		_, _ = s.client.queue.Nack(ctx, rec.Queue, rec.ID, s.workerID, "no handler registered", 0, true)
+		_, _ = s.client.queue.Nack(finCtx, rec.Queue, rec.ID, s.workerID, "no handler registered", 0, true)
 		return
 	}
 
@@ -531,7 +534,7 @@ func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 			}
 			event = append(event, "outcome", "rate_limited", "retry_in_ms", delay.Milliseconds(), "duration_ms", time.Since(start).Milliseconds())
 			s.logger.Info("winter: job processed", event...)
-			_ = s.client.queue.RescheduleJob(ctx, rec.Queue, rec.ID, s.workerID, time.Now().Add(delay))
+			_ = s.client.queue.RescheduleJob(finCtx, rec.Queue, rec.ID, s.workerID, time.Now().Add(delay))
 			return
 		}
 	}
@@ -565,19 +568,19 @@ func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 	event = append(event, "duration_ms", durationMs)
 
 	if err == nil {
-		if ackErr := s.client.queue.Ack(ctx, rec.Queue, rec.ID, s.workerID); ackErr != nil {
+		if ackErr := s.client.queue.Ack(finCtx, rec.Queue, rec.ID, s.workerID); ackErr != nil {
 			event = append(event, "outcome", "ack_error", "error", ackErr.Error())
 			s.logger.Error("winter: job processed", event...)
 			return
 		}
 		if len(rj.result) > 0 {
-			if resErr := s.client.queue.SetResult(ctx, rec.ID, rj.result, 7*24*time.Hour); resErr != nil {
+			if resErr := s.client.queue.SetResult(finCtx, rec.ID, rj.result, 7*24*time.Hour); resErr != nil {
 				s.logger.Error("winter: store result failed", "job_id", rec.ID, "error", resErr)
 			}
 		}
 		if rec.WorkflowID != "" {
 			mgr := workflow.NewManager(s.client.queue, s.client.rdb)
-			if wfErr := mgr.OnJobCompleted(ctx, rec.WorkflowID, rec.ID); wfErr != nil {
+			if wfErr := mgr.OnJobCompleted(finCtx, rec.WorkflowID, rec.ID); wfErr != nil {
 				s.logger.Error("winter: workflow advance error", "workflow_id", rec.WorkflowID, "error", wfErr)
 			}
 		}
@@ -592,7 +595,7 @@ func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 
 	if delay, ok := IsReschedule(err); ok {
 		event = append(event, "outcome", "rescheduled", "reschedule_delay_ms", delay.Milliseconds())
-		if rsErr := s.client.queue.RescheduleJob(ctx, rec.Queue, rec.ID, s.workerID, time.Now().Add(delay)); rsErr != nil {
+		if rsErr := s.client.queue.RescheduleJob(finCtx, rec.Queue, rec.ID, s.workerID, time.Now().Add(delay)); rsErr != nil {
 			event = append(event, "reschedule_error", rsErr.Error())
 			s.logger.Error("winter: job processed", event...)
 			return
@@ -603,7 +606,7 @@ func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 
 	if reason, ok := IsCancel(err); ok {
 		event = append(event, "outcome", "cancelled", "cancel_reason", reason)
-		if cErr := s.client.queue.CancelJob(ctx, rec.Queue, rec.ID, s.workerID, reason); cErr != nil {
+		if cErr := s.client.queue.CancelJob(finCtx, rec.Queue, rec.ID, s.workerID, reason); cErr != nil {
 			event = append(event, "cancel_error", cErr.Error())
 			s.logger.Error("winter: job processed", event...)
 			return
@@ -618,7 +621,7 @@ func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 		backoffMs = int64(Exponential(time.Second).Next(rec.Attempt) / time.Millisecond)
 	}
 
-	result, nackErr := s.client.queue.Nack(ctx, rec.Queue, rec.ID, s.workerID, err.Error(), backoffMs, skipRetry)
+	result, nackErr := s.client.queue.Nack(finCtx, rec.Queue, rec.ID, s.workerID, err.Error(), backoffMs, skipRetry)
 	if nackErr != nil {
 		event = append(event, "outcome", "nack_error", "nack_error_detail", nackErr.Error())
 		s.logger.Error("winter: job processed", event...)
@@ -630,7 +633,7 @@ func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 		s.fireHooks(ctx, s.hooks.onDead, je)
 		if rec.WorkflowID != "" {
 			mgr := workflow.NewManager(s.client.queue, s.client.rdb)
-			if wfErr := mgr.OnJobFailed(ctx, rec.WorkflowID, rec.ID); wfErr != nil {
+			if wfErr := mgr.OnJobFailed(finCtx, rec.WorkflowID, rec.ID); wfErr != nil {
 				s.logger.Error("winter: workflow failure error", "workflow_id", rec.WorkflowID, "error", wfErr)
 			}
 		}
