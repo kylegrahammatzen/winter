@@ -75,6 +75,8 @@ type Server struct {
 	logger     *slog.Logger
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
+	// inflight maps a currently-processing job id to its queue so the heartbeat can extend its lease.
+	inflight sync.Map
 }
 
 type serverHooks struct {
@@ -468,6 +470,14 @@ func (s *Server) heartbeatLoop(ctx context.Context) {
 				}
 				s.logger.Error("winter: heartbeat failed", "error", err)
 			}
+			s.inflight.Range(func(k, v any) bool {
+				jobID, _ := k.(string)
+				queueName, _ := v.(string)
+				if err := s.client.queue.ExtendLease(ctx, queueName, jobID, queue.DefaultLeaseDuration); err != nil && ctx.Err() == nil {
+					s.logger.Warn("winter: extend lease failed", "job_id", jobID, "error", err)
+				}
+				return true
+			})
 		}
 	}
 }
@@ -561,6 +571,10 @@ func (s *Server) processJob(ctx context.Context, rec *queue.JobRecord) {
 	for i := len(s.middleware) - 1; i >= 0; i-- {
 		fn = s.middleware[i](fn)
 	}
+
+	// Track the job so the heartbeat keeps its lease alive while the handler runs longer than the lease duration.
+	s.inflight.Store(rec.ID, rec.Queue)
+	defer s.inflight.Delete(rec.ID)
 
 	jobCtx := withClient(ctx, s.client)
 	err := fn(jobCtx, rj)
